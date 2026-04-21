@@ -10,12 +10,16 @@ export default function Dashboard({ token, onLogout }) {
   const [users, setUsers] = useState([])
   const [groupMessages, setGroupMessages] = useState([])
   const [privateMessages, setPrivateMessages] = useState([])
+  const [attachmentsMap, setAttachmentsMap] = useState({})
   const [selectedUser, setSelectedUser] = useState(null)
   const [project, setProject] = useState('Project1')
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState('overview')
   const [newMessage, setNewMessage] = useState('')
   const [newPrivateMessage, setNewPrivateMessage] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const groupFileRef = useRef(null)
+  const privateFileRef = useRef(null)
   const groupEndRef = useRef(null)
   const privateEndRef = useRef(null)
 
@@ -31,11 +35,13 @@ useEffect(() => {
           headers: { Authorization: `Bearer ${token}` } 
         })
         setGroupMessages(res.data)
+        loadAttachments(res.data)
       } else if (activeTab === 'private' && selectedUser) {
         const res = await axios.get(`${API}/messages/private/${project}/${selectedUser.email}`, { 
           headers: { Authorization: `Bearer ${token}` } 
         })
         setPrivateMessages(res.data)
+        loadAttachments(res.data)
       }
     } catch(err) {}
   }, 3000)
@@ -56,6 +62,7 @@ useEffect(() => { privateEndRef.current?.scrollIntoView({ behavior: 'smooth' }) 
       setTasks(tasksRes.data)
       setUsers(usersRes.data)
       setGroupMessages(groupRes.data)
+      loadAttachments(groupRes.data)
     } catch (err) {
       console.error(err)
     }
@@ -67,9 +74,20 @@ useEffect(() => { privateEndRef.current?.scrollIntoView({ behavior: 'smooth' }) 
     try {
       const res = await axios.get(`${API}/messages/private/${project}/${user.email}`, { headers })
       setPrivateMessages(res.data)
+      loadAttachments(res.data)
     } catch (err) {
       console.error(err)
     }
+  }
+  const loadAttachments = async (messages) => {
+    const newMap = {}
+    await Promise.all(messages.map(async m => {
+      try {
+        const res = await axios.get(`${API}/attachments/message/${m.id}`, { headers })
+        if (res.data.length > 0) newMap[m.id] = res.data
+      } catch {}
+    }))
+    setAttachmentsMap(prev => ({ ...prev, ...newMap }))
   }
 
   const sendGroupMessage = async () => {
@@ -84,6 +102,7 @@ useEffect(() => { privateEndRef.current?.scrollIntoView({ behavior: 'smooth' }) 
       setNewMessage('')
       const res = await axios.get(`${API}/messages/group/${project}`, { headers })
       setGroupMessages(res.data)
+      loadAttachments(res.data)
     } catch (err) { console.error(err) }
   }
 
@@ -99,9 +118,54 @@ useEffect(() => { privateEndRef.current?.scrollIntoView({ behavior: 'smooth' }) 
       setNewPrivateMessage('')
       const res = await axios.get(`${API}/messages/private/${project}/${selectedUser.email}`, { headers })
       setPrivateMessages(res.data)
+      loadAttachments(res.data)
     } catch (err) { console.error(err) }
   }
+const uploadFile = async (file, messageId) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('message_id', messageId)
+    await axios.post(`${API}/attachments/upload`, formData, {
+      headers: { ...headers, 'Content-Type': 'multipart/form-data' }
+    })
+  }
 
+  const handleFileSelect = async (e, isPrivate) => {
+    const file = e.target.files[0]
+    if (!file) return
+    if (file.size > 10 * 1024 * 1024) {
+      alert('File too large (max 10MB)')
+      return
+    }
+    setUploading(true)
+    try {
+      const messageId = crypto.randomUUID()
+      const messageText = `📎 ${file.name}`
+      
+      await axios.post(`${API}/messages`, {
+        id: messageId,
+        project_name: project,
+        message: messageText,
+        receiver: isPrivate ? selectedUser.email : null
+      }, { headers })
+      
+      await uploadFile(file, messageId)
+      
+      if (isPrivate) {
+        const res = await axios.get(`${API}/messages/private/${project}/${selectedUser.email}`, { headers })
+        setPrivateMessages(res.data)
+        
+      } else {
+        const res = await axios.get(`${API}/messages/group/${project}`, { headers })
+        setGroupMessages(res.data)
+        loadAttachments(res.data)
+      }
+    } catch (err) {
+      alert('Upload failed: ' + (err.response?.data?.error || err.message))
+    }
+    setUploading(false)
+    e.target.value = ''
+  }
   const stats = {
     open: tasks.filter(t => t.status === 'Open').length,
     inProgress: tasks.filter(t => t.status === 'InProgress').length,
@@ -256,12 +320,52 @@ useEffect(() => { privateEndRef.current?.scrollIntoView({ behavior: 'smooth' }) 
                         {m.element_name && (
                           <div className="mt-1 text-blue-600 text-xs font-medium">🔗 {m.element_name}</div>
                         )}
+                        {attachmentsMap[m.id]?.map(att => (
+                          <div key={att.id} className="mt-2">
+                            {att.resource_type === 'image' ? (
+                              <a href={att.file_url} target="_blank" rel="noreferrer">
+                                <img src={att.file_url} alt={att.file_name} className="max-w-xs rounded-lg border" />
+                              </a>
+                            ) : (
+                              <div className="flex items-center gap-2 bg-white border rounded-lg p-2">
+                                <a href={att.file_url} target="_blank" rel="noreferrer"
+                                  className="flex items-center gap-2 flex-1 hover:bg-gray-50 rounded p-1">
+                                  <span className="text-2xl">📄</span>
+                                  <div>
+                                    <div className="font-medium text-gray-700">{att.file_name}</div>
+                                    <div className="text-xs text-gray-500">{(att.file_size / 1024).toFixed(1)} KB</div>
+                                  </div>
+                                </a>
+                                <a href={att.file_url.replace('/upload/', '/upload/fl_attachment/')}
+                                  className="bg-blue-700 hover:bg-blue-800 text-white px-3 py-2 rounded text-sm font-medium"
+                                  title="Download">
+                                  ⬇
+                                </a>
+                              </div>
+                            )}
+                          </div>
+                        ))}
                       </div>
                     </div>
                   ))}
                   <div ref={groupEndRef} />
                 </div>
-                <div className="p-4 border-t flex gap-2">
+                <div className="p-4 border-t flex gap-2 items-center">
+                  <input
+                    type="file"
+                    ref={groupFileRef}
+                    onChange={e => handleFileSelect(e, false)}
+                    accept=".jpg,.jpeg,.png,.gif,.pdf,.dwg,.rvt"
+                    style={{ display: 'none' }}
+                  />
+                  <button
+                    onClick={() => groupFileRef.current?.click()}
+                    disabled={uploading}
+                    className="bg-gray-200 hover:bg-gray-300 text-gray-700 w-10 h-10 rounded-lg text-xl font-bold transition disabled:opacity-50"
+                    title="Attach file"
+                  >
+                    {uploading ? '⏳' : '+'}
+                  </button>
                   <input
                     value={newMessage}
                     onChange={e => setNewMessage(e.target.value)}
@@ -327,6 +431,31 @@ useEffect(() => { privateEndRef.current?.scrollIntoView({ behavior: 'smooth' }) 
                                 {m.element_name && (
                                   <div className="mt-1 text-blue-600 text-xs font-medium">🔗 {m.element_name}</div>
                                 )}
+                                {attachmentsMap[m.id]?.map(att => (
+                                  <div key={att.id} className="mt-2">
+                                    {att.resource_type === 'image' ? (
+                                      <a href={att.file_url} target="_blank" rel="noreferrer">
+                                        <img src={att.file_url} alt={att.file_name} className="max-w-full rounded-lg border" />
+                                      </a>
+                                    ) : (
+                                      <div className="flex items-center gap-2 bg-white border rounded p-2">
+                                        <a href={att.file_url} target="_blank" rel="noreferrer"
+                                          className="flex items-center gap-2 flex-1 overflow-hidden hover:bg-gray-50 rounded p-1">
+                                          <span className="text-xl">📄</span>
+                                          <div className="overflow-hidden">
+                                            <div className="font-medium text-gray-700 truncate">{att.file_name}</div>
+                                            <div className="text-xs text-gray-500">{(att.file_size / 1024).toFixed(1)} KB</div>
+                                          </div>
+                                        </a>
+                                        <a href={att.file_url.replace('/upload/', '/upload/fl_attachment/')}
+                                          className="bg-blue-700 hover:bg-blue-800 text-white px-2 py-1 rounded text-sm font-medium"
+                                          title="Download">
+                                          ⬇
+                                        </a>
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
                                 <div className="text-xs text-gray-400 mt-1 text-right">
                                   {new Date(m.created_at).toLocaleTimeString()}
                                 </div>
@@ -336,7 +465,22 @@ useEffect(() => { privateEndRef.current?.scrollIntoView({ behavior: 'smooth' }) 
                         })}
                         <div ref={privateEndRef} />
                       </div>
-                      <div className="p-4 border-t flex gap-2">
+                      <div className="p-4 border-t flex gap-2 items-center">
+                        <input
+                          type="file"
+                          ref={privateFileRef}
+                          onChange={e => handleFileSelect(e, true)}
+                          accept=".jpg,.jpeg,.png,.gif,.pdf,.dwg,.rvt"
+                          style={{ display: 'none' }}
+                        />
+                        <button
+                          onClick={() => privateFileRef.current?.click()}
+                          disabled={uploading}
+                          className="bg-gray-200 hover:bg-gray-300 text-gray-700 w-10 h-10 rounded-lg text-xl font-bold transition disabled:opacity-50"
+                          title="Attach file"
+                        >
+                          {uploading ? '⏳' : '+'}
+                        </button>
                         <input
                           value={newPrivateMessage}
                           onChange={e => setNewPrivateMessage(e.target.value)}
