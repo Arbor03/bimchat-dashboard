@@ -814,7 +814,13 @@ export default function Dashboard({ token, onLogout }) {
                 <div className="w-72 bg-white rounded-xl shadow flex flex-col overflow-hidden">
                   <div className="p-3 border-b flex justify-between items-center">
                     <h2 className="font-semibold text-gray-700">Chat</h2>
-                    <button onClick={() => setShowNewConvModal(true)}
+                    <button onClick={() => {
+                        const hasFiles = (openedProject?.files?.length || 0) > 0
+                        const hasFolders = folders.length > 0
+                        setNcLevel(hasFiles ? 'model' : (hasFolders ? 'folder' : 'project'))
+                        setNcFolderId(''); setNcFileId('')
+                        setShowNewConvModal(true)
+                      }}
                       className="bg-blue-700 hover:bg-blue-800 text-white px-2.5 py-1 rounded-lg text-sm">+ New</button>
                   </div>
                   <div className="flex-1 overflow-y-auto">
