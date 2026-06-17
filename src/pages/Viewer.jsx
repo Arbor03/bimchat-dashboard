@@ -245,7 +245,7 @@ export default function Viewer({
         const clones = arr.map(m => {
           const c = m.clone()
           c.transparent = true
-          c.opacity = 0.12
+          c.opacity = 0.8
           c.depthWrite = false
           return c
         })
