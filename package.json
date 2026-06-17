@@ -11,12 +11,15 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",
+    "@thatopen/components": "^3.4.6",
+    "@thatopen/fragments": "^3.4.5",
     "axios": "^1.15.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-router-dom": "^7.14.1",
     "recharts": "^3.8.1",
-    "tailwindcss": "^4.2.2"
+    "tailwindcss": "^4.2.2",
+    "three": "^0.184.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
