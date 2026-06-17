@@ -51,6 +51,9 @@ export default function Viewer({
 
   const modelIdToFileIdRef = useRef({})   // 'file-12' -> 12
   const loadedModelIdsRef = useRef(new Set())
+  const baseChildrenRef = useRef([])      // grid/lights present before any model
+  const syncRunningRef = useRef(false)
+  const syncPendingRef = useRef(false)
   const filesRef = useRef(modelList)
   useEffect(() => { filesRef.current = modelList }, [filesKey])
 
@@ -228,6 +231,10 @@ export default function Viewer({
 
         const grids = components.get(OBC.Grids)
         grids.create(world)
+
+        // snapshot the "furniture" (grid, lights) so we can detect stray model
+        // meshes later and clear ghosts on removal
+        baseChildrenRef.current = [...world.scene.three.children]
 
         setTimeout(() => {
           try {
@@ -413,71 +420,98 @@ export default function Viewer({
     let cancelled = false
     let retry = null
 
-    const sync = async () => {
-      const fragments = fragsRef.current
+    // Remove any mesh left in the scene that is NOT base furniture and NOT
+    // backed by a currently-loaded model (kills "ghost" leftovers after dispose).
+    const clearStrayObjects = () => {
       const world = worldRef.current
-      if (!fragments || !world) return
-
-      const desired = new Set(modelList.map(f => `file-${f.id}`))
-      const loaded = loadedModelIdsRef.current
-
-      // remove models no longer desired
-      for (const modelId of [...loaded]) {
-        if (!desired.has(modelId)) {
-          try {
-            const m = fragments.list.get(modelId)
-            if (m?.object) world.scene.three.remove(m.object)
-            await fragments.core.disposeModel(modelId)
-          } catch (e) { console.warn('dispose failed', modelId, e) }
-          loaded.delete(modelId)
-          delete modelIdToFileIdRef.current[modelId]
-        }
-      }
-
-      const wasEmpty = loaded.size === 0
-      let addedAny = false
-      let anyPending = false
-      const statusUpdates = {}
-
-      for (const f of modelList) {
-        const modelId = `file-${f.id}`
-        if (loaded.has(modelId)) { statusUpdates[f.id] = 'ready'; continue }
+      const fragments = fragsRef.current
+      if (!world || !fragments) return
+      const base = new Set(baseChildrenRef.current)
+      const keep = new Set()
+      for (const [, model] of fragments.list) { if (model?.object) keep.add(model.object) }
+      for (const child of [...world.scene.three.children]) {
+        if (base.has(child) || keep.has(child)) continue
         try {
-          // check conversion status (may still be converting)
-          const st = await axios.get(`${API}/web-export/${f.id}/status`, { headers })
-          if (cancelled) return
-          if (!(st.data.status === 'ready' && st.data.hasFrag)) {
-            statusUpdates[f.id] = st.data.status === 'error' ? 'error' : 'pending'
-            if (st.data.status !== 'error') anyPending = true
-            continue
-          }
-          const urlRes = await axios.get(`${API}/web-export/${f.id}/frag-url`, { headers })
-          const fragUrl = urlRes.data.downloadUrl
-          if (!fragUrl) { statusUpdates[f.id] = 'error'; continue }
-          const resp = await fetch(fragUrl)
-          if (!resp.ok) { statusUpdates[f.id] = 'error'; continue }
-          const buffer = await resp.arrayBuffer()
-          if (cancelled) return
-          await fragments.core.load(buffer, { modelId })
-          loaded.add(modelId)
-          modelIdToFileIdRef.current[modelId] = f.id
-          statusUpdates[f.id] = 'ready'
-          addedAny = true
-        } catch (e) {
-          console.warn('load failed', f.id, e)
-          statusUpdates[f.id] = 'error'
-        }
+          world.scene.three.remove(child)
+          child.traverse?.(o => { try { o.geometry?.dispose?.() } catch {} })
+        } catch {}
       }
+    }
 
-      if (cancelled) return
-      await fragments.core.update(true)
-      setModelStatus(prev => ({ ...prev, ...statusUpdates }))
+    const sync = async () => {
+      // serialize: never run two syncs at once (fast toggling caused ghosts)
+      if (syncRunningRef.current) { syncPendingRef.current = true; return }
+      syncRunningRef.current = true
+      try {
+        const fragments = fragsRef.current
+        const world = worldRef.current
+        if (!fragments || !world) return
 
-      if (wasEmpty && addedAny) await fitToLoaded()
-      setFirstSync(true)
+        const want = filesRef.current               // latest list (not stale closure)
+        const desired = new Set(want.map(f => `file-${f.id}`))
+        const loaded = loadedModelIdsRef.current
 
-      // if some models are still converting, retry shortly
-      if (anyPending && !cancelled) retry = setTimeout(sync, 4000)
+        // remove models no longer desired
+        for (const modelId of [...loaded]) {
+          if (!desired.has(modelId)) {
+            try {
+              const m = fragments.list.get(modelId)
+              if (m?.object) world.scene.three.remove(m.object)
+              await fragments.core.disposeModel(modelId)
+            } catch (e) { console.warn('dispose failed', modelId, e) }
+            loaded.delete(modelId)
+            delete modelIdToFileIdRef.current[modelId]
+          }
+        }
+
+        const wasEmpty = loaded.size === 0
+        let addedAny = false
+        let anyPending = false
+        const statusUpdates = {}
+
+        for (const f of want) {
+          const modelId = `file-${f.id}`
+          if (loaded.has(modelId)) { statusUpdates[f.id] = 'ready'; continue }
+          try {
+            const st = await axios.get(`${API}/web-export/${f.id}/status`, { headers })
+            if (cancelled) return
+            if (!(st.data.status === 'ready' && st.data.hasFrag)) {
+              statusUpdates[f.id] = st.data.status === 'error' ? 'error' : 'pending'
+              if (st.data.status !== 'error') anyPending = true
+              continue
+            }
+            const urlRes = await axios.get(`${API}/web-export/${f.id}/frag-url`, { headers })
+            const fragUrl = urlRes.data.downloadUrl
+            if (!fragUrl) { statusUpdates[f.id] = 'error'; continue }
+            const resp = await fetch(fragUrl)
+            if (!resp.ok) { statusUpdates[f.id] = 'error'; continue }
+            const buffer = await resp.arrayBuffer()
+            if (cancelled) return
+            await fragments.core.load(buffer, { modelId })
+            loaded.add(modelId)
+            modelIdToFileIdRef.current[modelId] = f.id
+            statusUpdates[f.id] = 'ready'
+            addedAny = true
+          } catch (e) {
+            console.warn('load failed', f.id, e)
+            statusUpdates[f.id] = 'error'
+          }
+        }
+
+        if (cancelled) return
+        clearStrayObjects()                     // wipe any ghost meshes
+        await fragments.core.update(true)
+        setModelStatus(prev => ({ ...prev, ...statusUpdates }))
+
+        if (wasEmpty && addedAny) await fitToLoaded()
+        setFirstSync(true)
+
+        if (anyPending && !cancelled) retry = setTimeout(sync, 4000)
+      } finally {
+        syncRunningRef.current = false
+        // if files changed while we were busy, run once more with the latest list
+        if (syncPendingRef.current && !cancelled) { syncPendingRef.current = false; sync() }
+      }
     }
 
     sync()
