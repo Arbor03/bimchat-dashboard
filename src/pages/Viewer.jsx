@@ -610,6 +610,8 @@ export default function Viewer({
         clearStrayObjects()                     // wipe any ghost meshes
         await fragments.core.update(true)
         applyDim(activeFileIdRef.current)        // keep non-active models ghosted
+        // freshly-loaded models stream their meshes in slightly later — re-dim
+        setTimeout(() => { if (!cancelled) applyDim(activeFileIdRef.current) }, 400)
         setModelStatus(prev => ({ ...prev, ...statusUpdates }))
 
         if (wasEmpty && addedAny) await fitToLoaded()
@@ -628,13 +630,20 @@ export default function Viewer({
   }, [worldReady, filesKey])
 
   // keep active model valid as `files` changes
+  const prevCountRef = useRef(modelList.length)
   useEffect(() => {
+    const ids = modelList.map(f => f.id)
+    const prevCount = prevCountRef.current
     setActiveFileId(prev => {
-      const ids = modelList.map(f => f.id)
+      // the active model was removed
       if (prev != null && !ids.includes(prev)) return ids.length === 1 ? ids[0] : null
+      // a single model auto-enters
       if (prev == null && ids.length === 1) return ids[0]
+      // grew from one model to several -> drop back to federated view
+      if (prev != null && prevCount <= 1 && ids.length > 1) return null
       return prev
     })
+    prevCountRef.current = ids.length
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filesKey])
 
