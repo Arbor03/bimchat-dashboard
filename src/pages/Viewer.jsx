@@ -59,7 +59,7 @@ export default function Viewer({
 
   const fileIdOfModelId = (mId) => modelIdToFileIdRef.current[mId]
   const nameOfFile = (fid) =>
-    (modelList.find(m => m.id === fid)?.name) ||
+    (filesRef.current.find(m => m.id === fid)?.name) ||
     (projectFiles || []).find(f => f.id === fid)?.file_name || 'Model'
 
   const [worldReady, setWorldReady] = useState(false)
@@ -70,6 +70,11 @@ export default function Viewer({
   const [selected, setSelected] = useState(null) // { name, ifcGuid, elementId, elementName, localId, modelId, fileId }
   const selectedRef = useRef(null)
   useEffect(() => { selectedRef.current = selected }, [selected])
+
+  // whole-model selection (federated view, before entering any model)
+  const [selectedModel, setSelectedModel] = useState(null) // { fileId, modelId, name }
+  const selBoxRef = useRef(null)        // THREE.Box3Helper for the selected model
+  const dimStateRef = useRef(new Map()) // mesh.uuid -> { mesh, original material }
 
   // which model is "entered" (active chat context). Default: the only model if
   // there is exactly one, otherwise none (project/folder context).
@@ -198,6 +203,90 @@ export default function Viewer({
     } catch (e) { console.warn('fit failed', e) }
   }
 
+  // ---------- whole-model selection box (Revit-group style) ----------
+  const clearModelBox = () => {
+    const world = worldRef.current
+    if (selBoxRef.current) {
+      try { world?.scene.three.remove(selBoxRef.current) } catch {}
+      try { selBoxRef.current.geometry?.dispose?.() } catch {}
+      selBoxRef.current = null
+    }
+  }
+
+  const showModelBox = (modelId) => {
+    const world = worldRef.current
+    const fragments = fragsRef.current
+    if (!world || !fragments) return
+    clearModelBox()
+    const model = fragments.list.get(modelId)
+    if (!model?.object) return
+    try {
+      const box = new THREE.Box3().setFromObject(model.object)
+      if (box.isEmpty()) return
+      const helper = new THREE.Box3Helper(box, new THREE.Color('#3b82f6'))
+      helper.userData.__bimchatKeep = true   // don't let the ghost-cleaner remove it
+      world.scene.three.add(helper)
+      selBoxRef.current = helper
+    } catch (e) { console.warn('model box failed', e) }
+  }
+
+  // ---------- dim non-active models (ghosting) ----------
+  // Clones each affected mesh's material so dimming one model never bleeds into
+  // another (That Open can share materials). Restored on un-dim.
+  const setModelDimmed = (modelId, dim) => {
+    const model = fragsRef.current?.list.get(modelId)
+    if (!model?.object) return
+    model.object.traverse(o => {
+      if (!o.isMesh) return
+      if (dim) {
+        if (dimStateRef.current.has(o.uuid)) return
+        const orig = o.material
+        const arr = Array.isArray(orig) ? orig : [orig]
+        const clones = arr.map(m => {
+          const c = m.clone()
+          c.transparent = true
+          c.opacity = 0.12
+          c.depthWrite = false
+          return c
+        })
+        dimStateRef.current.set(o.uuid, { mesh: o, original: orig })
+        o.material = Array.isArray(orig) ? clones : clones[0]
+      } else {
+        const saved = dimStateRef.current.get(o.uuid)
+        if (!saved) return
+        const cur = o.material
+        const curArr = Array.isArray(cur) ? cur : [cur]
+        o.material = saved.original
+        curArr.forEach(c => { try { c.dispose?.() } catch {} })
+        dimStateRef.current.delete(o.uuid)
+      }
+    })
+  }
+
+  const applyDim = (activeFid) => {
+    const fragments = fragsRef.current
+    if (!fragments) return
+    for (const [modelId] of fragments.list) {
+      const fid = modelIdToFileIdRef.current[modelId]
+      setModelDimmed(modelId, activeFid != null && fid !== activeFid)
+    }
+    try { fragments.core.update(true) } catch {}
+  }
+
+  // when the active model changes, reset selection, redraw the box, re-dim
+  useEffect(() => {
+    if (!worldReady) return
+    clearModelBox()
+    setSelectedModel(null)
+    setSelected(null)
+    ;(async () => {
+      try { await fragsRef.current?.resetHighlight() } catch {}
+      applyDim(activeFileId)
+      try { await fragsRef.current?.core.update(true) } catch {}
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFileId, worldReady])
+
   // ===================================================================
   // EFFECT A — build the 3D world ONCE (no model loading here)
   // ===================================================================
@@ -299,18 +388,38 @@ export default function Viewer({
           }
           try {
             const result = await caster.castRay()
+            const activeFid = activeFileIdRef.current
+
+            // empty space -> clear element + whole-model selection
             if (!result) {
               await fragments.resetHighlight()
               await fragments.core.update(true)
               setSelected(null)
+              setSelectedModel(null)
+              clearModelBox()
               return
             }
+
             const mId = result.fragments.modelId
             const localId = result.localId
             const model = fragments.list.get(mId)
             if (!model) return
             const clickedFileId = fileIdOfModelId(mId)
 
+            // CASE 1 — no model entered: select the WHOLE clicked model (Revit-group style)
+            if (activeFid == null) {
+              await fragments.resetHighlight()
+              await fragments.core.update(true)
+              setSelected(null)
+              setSelectedModel({ fileId: clickedFileId, modelId: mId, name: nameOfFile(clickedFileId) })
+              showModelBox(mId)
+              return
+            }
+
+            // CASE 2 — inside a model: ignore clicks on OTHER models
+            if (clickedFileId !== activeFid) return
+
+            // CASE 3 — element selection within the active model
             let ifcGuid = null
             try {
               const guids = await model.getGuidsByLocalIds([localId])
@@ -341,7 +450,6 @@ export default function Viewer({
             )
             await fragments.core.update(true)
 
-            // SELECT only — do not change the active model (Opsioni A)
             setSelected({
               name: name || elementName || '(no name)',
               ifcGuid, elementId, elementName, localId, modelId: mId, fileId: clickedFileId
@@ -430,7 +538,7 @@ export default function Viewer({
       const keep = new Set()
       for (const [, model] of fragments.list) { if (model?.object) keep.add(model.object) }
       for (const child of [...world.scene.three.children]) {
-        if (base.has(child) || keep.has(child)) continue
+        if (base.has(child) || keep.has(child) || child.userData?.__bimchatKeep) continue
         try {
           world.scene.three.remove(child)
           child.traverse?.(o => { try { o.geometry?.dispose?.() } catch {} })
@@ -501,6 +609,7 @@ export default function Viewer({
         if (cancelled) return
         clearStrayObjects()                     // wipe any ghost meshes
         await fragments.core.update(true)
+        applyDim(activeFileIdRef.current)        // keep non-active models ghosted
         setModelStatus(prev => ({ ...prev, ...statusUpdates }))
 
         if (wasEmpty && addedAny) await fitToLoaded()
@@ -1042,9 +1151,15 @@ export default function Viewer({
                   <span className="truncate max-w-[160px]">In: {nameOfFile(activeFileId)}</span>
                   <button onClick={() => setActiveFileId(null)} className="hover:bg-blue-800 rounded px-1.5 -mr-1">Exit</button>
                 </div>
+              ) : selectedModel ? (
+                <div className="bg-blue-600 text-white rounded shadow px-3 py-1.5 text-sm flex items-center gap-2">
+                  <span className="truncate max-w-[180px]">Model: {selectedModel.name}</span>
+                  <button onClick={() => setActiveFileId(selectedModel.fileId)}
+                    className="bg-white/20 hover:bg-white/30 rounded px-2 py-0.5 text-xs">Enter</button>
+                </div>
               ) : (
                 <div className="bg-amber-100 text-amber-800 rounded shadow px-3 py-1.5 text-sm">
-                  Double-click a model to enter it
+                  Click a model to select · double-click to enter
                 </div>
               )
             )}
