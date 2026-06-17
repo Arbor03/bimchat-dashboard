@@ -65,12 +65,13 @@ export default function Dashboard({ token, onLogout }) {
   const [projects, setProjects] = useState([])
   const [openedProject, setOpenedProject] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [viewerFile, setViewerFile] = useState(null)
+  // The 3D scene is a single live list of models (array of { id, name } | null).
+  // Single 3D open = [one model]; "Open 3D" = the selected models; while open you
+  // add/remove models from the sidebar checkboxes.
+  const [viewerFiles, setViewerFiles] = useState(null)
 
-  // Federated viewer: set of selected file ids (only web-ready models), and the
-  // list passed to the multi-model viewer when "Open 3D" is pressed.
+  // Pre-launch selection (checkboxes in the Revit Files panel).
   const [federatedSel, setFederatedSel] = useState(() => new Set())
-  const [federatedFiles, setFederatedFiles] = useState(null) // array of { id, name } | null
 
   const [activeTab, setActiveTab] = useState('overview')
   const [filesExpanded, setFilesExpanded] = useState(false)
@@ -131,6 +132,7 @@ export default function Dashboard({ token, onLogout }) {
       setTasks([]); setUsers([]); setAttachmentsMap({})
       setConversations([]); setSelectedConv(null); setConvMessages([])
       setFederatedSel(new Set())   // reset model selection when switching project
+      setViewerFiles(null)
     } catch (err) {
       alert('Failed to open project: ' + (err.response?.data?.error || err.message))
     }
@@ -140,6 +142,7 @@ export default function Dashboard({ token, onLogout }) {
     setOpenedProject(null)
     setActiveTab('overview')
     setFederatedSel(new Set())
+    setViewerFiles(null)
   }
 
   useEffect(() => {
@@ -469,19 +472,30 @@ export default function Dashboard({ token, onLogout }) {
 
   const clearFederated = () => setFederatedSel(new Set())
 
-  // Open the selected models. One model -> existing single viewer.
-  // Two or more -> federated multi-model viewer (built in the next step).
+  // Open the selected models in the live 3D scene.
   const openFederated = () => {
     const ids = [...federatedSel]
     if (ids.length === 0) return
     const chosen = (openedProject.files || [])
       .filter(f => ids.includes(f.id))
       .map(f => ({ id: f.id, name: f.file_name }))
-    if (chosen.length === 1) {
-      setViewerFile(chosen[0])
-      return
-    }
-    setFederatedFiles(chosen)
+    setViewerFiles(chosen)
+  }
+
+  // open a single model directly in 3D
+  const open3D = (f) => setViewerFiles([{ id: f.id, name: f.file_name }])
+
+  // is a model currently in the open 3D scene?
+  const inScene = (id) => (viewerFiles || []).some(x => x.id === id)
+
+  // add/remove a model from the live scene (only meaningful while 3D is open)
+  const toggleSceneModel = (f) => {
+    setViewerFiles(prev => {
+      if (!prev) return prev
+      return prev.some(x => x.id === f.id)
+        ? prev.filter(x => x.id !== f.id)
+        : [...prev, { id: f.id, name: f.file_name }]
+    })
   }
 
   // ---------- conversation display helpers ----------
@@ -541,7 +555,7 @@ export default function Dashboard({ token, onLogout }) {
   ]
 
   return (
-    <div className={`bg-gray-100 ${viewerFile || federatedFiles ? 'h-screen overflow-hidden' : 'min-h-screen'}`}>
+    <div className={`bg-gray-100 ${viewerFiles ? 'h-screen overflow-hidden' : 'min-h-screen'}`}>
       <div className="bg-blue-700 text-white px-6 h-[72px] flex justify-between items-center shadow">
         <div>
           <h1 className="text-2xl font-bold">BIM Chat Dashboard</h1>
@@ -639,16 +653,26 @@ export default function Dashboard({ token, onLogout }) {
                 const filesIn = (folderId) => allFiles.filter(f => f.folder_id === folderId)
                 const noFolder = allFiles.filter(f => !f.folder_id)
 
-                const SbFile = ({ f, level }) => (
-                  <div className={`flex items-center gap-1.5 pr-2 py-1 rounded text-sm cursor-pointer
-                    ${selectedFile?.id === f.id ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
-                    style={{ paddingLeft: 12 + level * 12 }}>
-                    <button onClick={(e) => { e.stopPropagation(); setViewerFile({ id: f.id, name: f.file_name }) }}
-                      title="Open 3D" className="text-sm leading-none hover:scale-110 transition">🧊</button>
-                    <span onClick={() => { setSelectedFile(f); setActiveTab('files') }}
-                      className="flex-1 truncate text-xs" title={f.file_name}>{f.file_name}</span>
-                  </div>
-                )
+                const SbFile = ({ f, level }) => {
+                  const onWeb = isOnWeb(f)
+                  return (
+                    <div className={`flex items-center gap-1.5 pr-2 py-1 rounded text-sm cursor-pointer
+                      ${selectedFile?.id === f.id ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                      style={{ paddingLeft: 12 + level * 12 }}>
+                      {viewerFiles ? (
+                        <input type="checkbox" checked={inScene(f.id)} disabled={!onWeb}
+                          onChange={() => toggleSceneModel(f)}
+                          title={onWeb ? 'Add / remove from the 3D scene' : 'Not on web yet'}
+                          className="w-3.5 h-3.5 accent-blue-700 disabled:opacity-40 disabled:cursor-not-allowed" />
+                      ) : (
+                        <button onClick={(e) => { e.stopPropagation(); open3D(f) }}
+                          title="Open 3D" className="text-sm leading-none hover:scale-110 transition">🧊</button>
+                      )}
+                      <span onClick={() => { setSelectedFile(f); setActiveTab('files') }}
+                        className="flex-1 truncate text-xs" title={f.file_name}>{f.file_name}</span>
+                    </div>
+                  )
+                }
 
                 const SbFolder = ({ folder, level }) => {
                   const isOpen = expandedFolders['sb-' + folder.id] !== false
@@ -999,7 +1023,7 @@ export default function Dashboard({ token, onLogout }) {
                     </div>
                   </div>
                   <div className="flex gap-2 mt-6 pt-4 border-t">
-                    <button onClick={() => setViewerFile({ id: selectedFile.id, name: selectedFile.file_name })}
+                    <button onClick={() => open3D(selectedFile)}
                       className="bg-blue-700 hover:bg-blue-800 text-white px-4 py-2 rounded-lg text-sm">🧊 Open 3D</button>
                     <button onClick={() => { unlinkFile(selectedFile.id, selectedFile.file_name); setSelectedFile(null) }}
                       className="text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg text-sm">✕ Unlink</button>
@@ -1045,7 +1069,7 @@ export default function Dashboard({ token, onLogout }) {
                             onChange={() => toggleFederated(f.id)}
                             title={onWeb ? 'Select for federated 3D' : 'Not on web yet — open it in Revit and press "Web"'}
                             className="w-4 h-4 accent-blue-700 disabled:opacity-40 disabled:cursor-not-allowed" />
-                          <button onClick={() => setViewerFile({ id: f.id, name: f.file_name })}
+                          <button onClick={() => open3D(f)}
                             className="text-xl hover:scale-110 transition" title="Open 3D">🧊</button>
                           <div className="flex-1 cursor-pointer min-w-0" onClick={() => setSelectedFile(f)}>
                             <p className="font-medium text-gray-800 truncate">{f.file_name}</p>
@@ -1137,7 +1161,7 @@ export default function Dashboard({ token, onLogout }) {
       )}
 
       {/* ---------- FEDERATED SELECTION BAR ---------- */}
-      {openedProject && federatedSel.size > 0 && !viewerFile && !federatedFiles && (
+      {openedProject && federatedSel.size > 0 && !viewerFiles && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-white rounded-full shadow-xl border border-gray-200 flex items-center gap-3 pl-5 pr-3 py-2">
           <span className="text-sm text-gray-700">
             <span className="font-bold text-blue-700">{federatedSel.size}</span> model(s) selected
@@ -1311,33 +1335,17 @@ export default function Dashboard({ token, onLogout }) {
         </div>
       )}
 
-      {/* Single-model viewer */}
-      {viewerFile && (
+      {/* Live 3D scene (single or multiple models, added/removed from the sidebar) */}
+      {viewerFiles && (
         <Viewer
-          fileId={viewerFile.id}
-          fileName={viewerFile.name}
+          files={viewerFiles}
           projectName={openedProject.name}
           projectId={openedProject.id}
           folders={folders}
           projectFiles={openedProject.files || []}
           projectMembers={openedProject.members || []}
           token={token}
-          onClose={() => setViewerFile(null)}
-        />
-      )}
-
-      {/* Federated (multi-model) viewer — Viewer support wired in Phase 2 */}
-      {federatedFiles && (
-        <Viewer
-          files={federatedFiles}
-          federated={true}
-          projectName={openedProject.name}
-          projectId={openedProject.id}
-          folders={folders}
-          projectFiles={openedProject.files || []}
-          projectMembers={openedProject.members || []}
-          token={token}
-          onClose={() => setFederatedFiles(null)}
+          onClose={() => setViewerFiles(null)}
         />
       )}
     </div>
