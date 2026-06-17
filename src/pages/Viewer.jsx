@@ -1379,19 +1379,6 @@ export default function Viewer({
               </>
             ) : (
               <>
-                {/* active-model picker (explicit context control) */}
-                {multi && (
-                  <div className="px-3 py-2 border-b bg-gray-50 flex items-center gap-2">
-                    <span className="text-xs text-gray-500 flex-shrink-0">Active model</span>
-                    <select
-                      value={activeFileId ?? ''}
-                      onChange={e => setActiveFileId(e.target.value === '' ? null : parseInt(e.target.value))}
-                      className="flex-1 border border-gray-300 rounded px-2 py-1 text-xs bg-white">
-                      <option value="">— None (project / folder) —</option>
-                      {modelList.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
-                    </select>
-                  </div>
-                )}
                 <div className="px-3 py-2 border-b flex justify-between items-center">
                   <span className="font-semibold text-gray-700 text-sm">Chat</span>
                   <button onClick={() => setShowNewConvModal(true)}
