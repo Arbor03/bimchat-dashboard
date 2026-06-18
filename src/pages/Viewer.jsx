@@ -1401,25 +1401,14 @@ export default function Viewer({
     // First capture was stale ("works on the 2nd click") because the first
     // render only primes the GPU/geometry. So render once, wait a frame, render
     // again, then read — the 1st click already yields the correct frame.
+    // The model lives on renderer.domElement (confirmed). The WebGL backbuffer
+    // can be cleared after compositing, so the read MUST be synchronous, right
+    // after a manual render — no async waits in between (they let the buffer
+    // clear, which produced an empty/stale capture).
     try { for (const [, m] of fragments.list) m.useCamera(world.camera.three) } catch {}
-    try { await fragments?.core.update(true) } catch {}
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
-    try { await fragments?.core.update(true) } catch {}
-    await new Promise(r => requestAnimationFrame(r))
-
-    // --- TEMP DIAGNOSTIC: list every canvas so we can pick the right one ---
-    try {
-      const cs = Array.from(container.querySelectorAll('canvas'))
-      const dom = world.renderer?.three?.domElement
-      const lines = cs.map((c, i) => {
-        const r = c.getBoundingClientRect()
-        const isDom = c === dom ? ' [renderer.domElement]' : ''
-        const isChosen = c === canvas ? ' <== CHOSEN' : ''
-        return `#${i}: buffer ${c.width}x${c.height} | screen ${Math.round(r.width)}x${Math.round(r.height)}${isDom}${isChosen}`
-      })
-      alert('Canvases (' + cs.length + '):\n' + lines.join('\n'))
-    } catch (e) { alert('diag err: ' + e.message) }
-    // --- END DIAGNOSTIC ---
+    try { fragments?.core.update(true) } catch {}
+    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
+    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
 
     let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
