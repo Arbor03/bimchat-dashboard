@@ -41,15 +41,14 @@ const ANNOT_TOOLS = [
   { id: 'rect', label: '▭ Rect' },
 ]
 
-// Floating, draggable annotate window (does NOT block the rest of the app).
-// Tools mirror the Revit add-in. Text is edited inline; Callout is a text box
-// with a leader line pointing at a target; Cloud is a proper scalloped loop.
-// NOTE: still a work-in-progress visual quality — to be refined further.
+// Floating, draggable, resizable annotate window. Annotations stay editable
+// (select / move / resize / re-edit / delete) and are flattened only on Send.
 function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const canvasRef = useRef(null)
-  const wrapRef = useRef(null)
   const imgRef = useRef(null)
+  const scrollRef = useRef(null)
   const [imgLoaded, setImgLoaded] = useState(false)
+
   const [tool, setTool] = useState('pen')
   const [color, setColor] = useState('#e74c3c')
   const [width, setWidth] = useState(3)
@@ -57,61 +56,77 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const [shapes, setShapes] = useState([])
   const shapesRef = useRef([])
   useEffect(() => { shapesRef.current = shapes }, [shapes])
+  const idRef = useRef(1)
 
-  // display sizing (CSS px). dispW = canvas pixel width * scale
-  const [dispW, setDispW] = useState(0)
-  const [dispH, setDispH] = useState(0)
-  const scaleRef = useRef(1) // canvas pixels -> CSS px
+  const [selId, setSelId] = useState(null)
+  const selIdRef = useRef(null)
+  useEffect(() => { selIdRef.current = selId }, [selId])
 
-  // floating window position
-  const [pos, setPos] = useState({ x: 80, y: 80 })
+  // zoom / fit
+  const natRef = useRef({ w: 0, h: 0 })
+  const fitRef = useRef(1)
+  const [zoom, setZoom] = useState(1) // canvas px -> CSS px
+  const zoomRef = useRef(1); useEffect(() => { zoomRef.current = zoom }, [zoom])
+
+  // floating window position + size
+  const [pos, setPos] = useState({ x: 70, y: 70 })
+  const [size, setSize] = useState({ w: 720, h: 560 })
+  const [full, setFull] = useState(false)
   const dragRef = useRef(null)
+  const resizeRef = useRef(null)
 
   // inline text editor overlay
-  const [editor, setEditor] = useState(null) // { kind:'text'|'callout', cx, cy, target, text }
+  const [editor, setEditor] = useState(null) // { kind, cx, cy, target, text, editId? }
   const editorInputRef = useRef(null)
 
-  const drawingRef = useRef(null)
   const toolRef = useRef(tool); useEffect(() => { toolRef.current = tool }, [tool])
   const colorRef = useRef(color); useEffect(() => { colorRef.current = color }, [color])
   const widthRef = useRef(width); useEffect(() => { widthRef.current = width }, [width])
+  const interRef = useRef(null) // active interaction {mode,...}
 
-  // load base image
+  // load base image, compute fit
   useEffect(() => {
     const img = new Image()
     img.onload = () => {
       imgRef.current = img
+      natRef.current = { w: img.naturalWidth, h: img.naturalHeight }
       const c = canvasRef.current
       if (c) { c.width = img.naturalWidth; c.height = img.naturalHeight }
-      const avail = Math.min(window.innerWidth - 160, 1000)
-      const availH = window.innerHeight - 320
-      const scale = Math.min(avail / img.naturalWidth, availH / img.naturalHeight, 1)
-      scaleRef.current = scale
-      setDispW(Math.round(img.naturalWidth * scale))
-      setDispH(Math.round(img.naturalHeight * scale))
       setImgLoaded(true)
+      setTimeout(fitToWindow, 0)
     }
     img.src = imageUrl
   }, [imageUrl])
 
-  // ---- drawing primitives ----
+  const areaSize = () => {
+    const el = scrollRef.current
+    if (el) return { w: el.clientWidth - 8, h: el.clientHeight - 8 }
+    return { w: size.w - 24, h: size.h - 150 }
+  }
+  const fitToWindow = () => {
+    const n = natRef.current
+    if (!n.w) return
+    const a = areaSize()
+    const f = Math.min(a.w / n.w, a.h / n.h, 1) || 1
+    fitRef.current = f
+    setZoom(f)
+  }
+
+  // ---------- drawing primitives ----------
   const drawArrow = (ctx, x1, y1, x2, y2, lw) => {
     const head = Math.max(10, lw * 3)
     const ang = Math.atan2(y2 - y1, x2 - x1)
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke()
-    ctx.beginPath()
-    ctx.moveTo(x2, y2)
+    ctx.beginPath(); ctx.moveTo(x2, y2)
     ctx.lineTo(x2 - head * Math.cos(ang - Math.PI / 6), y2 - head * Math.sin(ang - Math.PI / 6))
     ctx.lineTo(x2 - head * Math.cos(ang + Math.PI / 6), y2 - head * Math.sin(ang + Math.PI / 6))
     ctx.closePath(); ctx.fillStyle = ctx.strokeStyle; ctx.fill()
   }
-
-  // closed scalloped revision cloud around the given rect
   const drawCloud = (ctx, x, y, w, h) => {
     const x0 = Math.min(x, x + w), y0 = Math.min(y, y + h)
     const ww = Math.abs(w), hh = Math.abs(h)
     if (ww < 6 || hh < 6) return
-    const r = Math.max(8, Math.min(ww, hh) / 6) // scallop radius
+    const r = Math.max(8, Math.min(ww, hh) / 6)
     const scallop = (ax, ay, bx, by, nx, ny) => {
       const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy)
       const n = Math.max(2, Math.round(len / (r * 1.8)))
@@ -122,69 +137,102 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
         ctx.quadraticCurveTo(cx, cy, ex, ey)
       }
     }
-    ctx.beginPath()
-    ctx.moveTo(x0, y0)
-    scallop(x0, y0, x0 + ww, y0, 0, -1)        // top  (outward up)
-    scallop(x0 + ww, y0, x0 + ww, y0 + hh, 1, 0) // right
-    scallop(x0 + ww, y0 + hh, x0, y0 + hh, 0, 1)  // bottom
-    scallop(x0, y0 + hh, x0, y0, -1, 0)          // left
-    ctx.closePath()
-    ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(x0, y0)
+    scallop(x0, y0, x0 + ww, y0, 0, -1)
+    scallop(x0 + ww, y0, x0 + ww, y0 + hh, 1, 0)
+    scallop(x0 + ww, y0 + hh, x0, y0 + hh, 0, 1)
+    scallop(x0, y0 + hh, x0, y0, -1, 0)
+    ctx.closePath(); ctx.stroke()
   }
-
+  const fontPx = (s) => Math.max(14, s.width * 6)
+  const textLines = (s) => String(s.text).split('\n')
+  const textBox = (ctx, s) => {
+    const fs = fontPx(s); ctx.font = `bold ${fs}px sans-serif`
+    const lines = textLines(s)
+    const tw = Math.max(1, ...lines.map(l => ctx.measureText(l).width))
+    return { w: tw, h: lines.length * fs * 1.2, fs, lines }
+  }
   const drawText = (ctx, s) => {
-    const fs = Math.max(14, s.width * 6)
-    ctx.font = `bold ${fs}px sans-serif`
-    ctx.textBaseline = 'top'
-    ctx.fillStyle = s.color
-    const lines = String(s.text).split('\n')
-    lines.forEach((ln, i) => ctx.fillText(ln, s.x, s.y + i * fs * 1.2))
+    const b = textBox(ctx, s)
+    ctx.textBaseline = 'top'; ctx.fillStyle = s.color
+    b.lines.forEach((ln, i) => ctx.fillText(ln, s.x, s.y + i * b.fs * 1.2))
   }
-
   const drawCallout = (ctx, s) => {
-    const fs = Math.max(14, s.width * 6)
-    ctx.font = `bold ${fs}px sans-serif`
-    const pad = 6
-    const lines = String(s.text).split('\n')
-    const tw = Math.max(...lines.map(l => ctx.measureText(l).width))
-    const bw = tw + pad * 2, bh = lines.length * fs * 1.2 + pad * 2
-    // leader from target to nearest box corner
+    const b = textBox(ctx, s); const pad = 6
+    const bw = b.w + pad * 2, bh = b.h + pad * 2
     if (s.target) {
       ctx.strokeStyle = s.color; ctx.lineWidth = s.width
       ctx.beginPath(); ctx.moveTo(s.target.x, s.target.y); ctx.lineTo(s.x, s.y + bh); ctx.stroke()
       ctx.beginPath(); ctx.arc(s.target.x, s.target.y, Math.max(3, s.width), 0, Math.PI * 2)
       ctx.fillStyle = s.color; ctx.fill()
     }
-    // box
-    ctx.fillStyle = 'rgba(255,255,255,0.92)'
-    ctx.fillRect(s.x, s.y, bw, bh)
-    ctx.strokeStyle = s.color; ctx.lineWidth = s.width
-    ctx.strokeRect(s.x, s.y, bw, bh)
-    // text
+    ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillRect(s.x, s.y, bw, bh)
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width; ctx.strokeRect(s.x, s.y, bw, bh)
     ctx.fillStyle = s.color; ctx.textBaseline = 'top'
-    lines.forEach((ln, i) => ctx.fillText(ln, s.x + pad, s.y + pad + i * fs * 1.2))
+    b.lines.forEach((ln, i) => ctx.fillText(ln, s.x + pad, s.y + pad + i * b.fs * 1.2))
   }
-
   const drawShape = (ctx, s) => {
     ctx.strokeStyle = s.color; ctx.fillStyle = s.color
     ctx.lineWidth = s.width; ctx.lineJoin = 'round'; ctx.lineCap = 'round'
-    if (s.tool === 'pen') {
-      ctx.beginPath()
-      s.points.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y))
-      ctx.stroke()
-    } else if (s.tool === 'rect') {
-      ctx.strokeRect(s.x, s.y, s.w, s.h)
-    } else if (s.tool === 'arrow') {
-      drawArrow(ctx, s.x1, s.y1, s.x2, s.y2, s.width)
-    } else if (s.tool === 'cloud') {
-      drawCloud(ctx, s.x, s.y, s.w, s.h)
-    } else if (s.tool === 'text') {
-      drawText(ctx, s)
-    } else if (s.tool === 'callout') {
-      drawCallout(ctx, s)
-    }
+    if (s.tool === 'pen') { ctx.beginPath(); s.points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke() }
+    else if (s.tool === 'rect') ctx.strokeRect(s.x, s.y, s.w, s.h)
+    else if (s.tool === 'arrow') drawArrow(ctx, s.x1, s.y1, s.x2, s.y2, s.width)
+    else if (s.tool === 'cloud') drawCloud(ctx, s.x, s.y, s.w, s.h)
+    else if (s.tool === 'text') drawText(ctx, s)
+    else if (s.tool === 'callout') drawCallout(ctx, s)
   }
 
+  // ---------- geometry helpers ----------
+  const bbox = (s) => {
+    const ctx = canvasRef.current?.getContext('2d')
+    if (s.tool === 'rect' || s.tool === 'cloud') return { x: Math.min(s.x, s.x + s.w), y: Math.min(s.y, s.y + s.h), w: Math.abs(s.w), h: Math.abs(s.h) }
+    if (s.tool === 'arrow') return { x: Math.min(s.x1, s.x2), y: Math.min(s.y1, s.y2), w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1) }
+    if (s.tool === 'pen') {
+      const xs = s.points.map(p => p.x), ys = s.points.map(p => p.y)
+      return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }
+    }
+    if (ctx && (s.tool === 'text' || s.tool === 'callout')) {
+      const b = textBox(ctx, s); const pad = s.tool === 'callout' ? 6 : 0
+      return { x: s.x, y: s.y, w: b.w + pad * 2, h: b.h + pad * 2 }
+    }
+    return { x: s.x || 0, y: s.y || 0, w: 0, h: 0 }
+  }
+  const handlesOf = (s) => {
+    if (s.tool === 'arrow') return [{ id: 'p1', x: s.x1, y: s.y1 }, { id: 'p2', x: s.x2, y: s.y2 }]
+    if (s.tool === 'callout') {
+      const b = bbox(s); const hs = [{ id: 'box', x: b.x, y: b.y }]
+      if (s.target) hs.push({ id: 'target', x: s.target.x, y: s.target.y })
+      return hs
+    }
+    if (s.tool === 'rect' || s.tool === 'cloud') {
+      const b = bbox(s)
+      return [
+        { id: 'tl', x: b.x, y: b.y }, { id: 'tr', x: b.x + b.w, y: b.y },
+        { id: 'br', x: b.x + b.w, y: b.y + b.h }, { id: 'bl', x: b.x, y: b.y + b.h },
+      ]
+    }
+    return []
+  }
+  const hitShape = (px, py) => {
+    const arr = shapesRef.current
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const s = arr[i]
+      if (s.tool === 'arrow') {
+        if (distToSeg(px, py, s.x1, s.y1, s.x2, s.y2) < Math.max(8, s.width + 6) / zoomRef.current) return s
+      } else {
+        const b = bbox(s); const pad = 6 / zoomRef.current
+        if (px >= b.x - pad && px <= b.x + b.w + pad && py >= b.y - pad && py <= b.y + b.h + pad) return s
+      }
+    }
+    return null
+  }
+  const distToSeg = (px, py, x1, y1, x2, y2) => {
+    const dx = x2 - x1, dy = y2 - y1
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy || 1)))
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+  }
+
+  // ---------- redraw ----------
   const redraw = (preview) => {
     const c = canvasRef.current, img = imgRef.current
     if (!c || !img) return
@@ -193,199 +241,307 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     ctx.drawImage(img, 0, 0)
     for (const s of shapesRef.current) drawShape(ctx, s)
     if (preview) drawShape(ctx, preview)
-  }
-  useEffect(() => { if (imgLoaded) redraw() }, [imgLoaded, shapes])
-
-  const toCanvasXY = (e) => {
-    const c = canvasRef.current
-    const rect = c.getBoundingClientRect()
-    return {
-      x: (e.clientX - rect.left) * (c.width / rect.width),
-      y: (e.clientY - rect.top) * (c.height / rect.height),
+    // selection overlay (not exported — we deselect before Send)
+    const sel = shapesRef.current.find(s => s.id === selIdRef.current)
+    if (sel) {
+      const z = zoomRef.current, b = bbox(sel)
+      ctx.save()
+      ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1 / z; ctx.setLineDash([5 / z, 4 / z])
+      ctx.strokeRect(b.x, b.y, b.w, b.h); ctx.setLineDash([])
+      const hs = 8 / z
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1.5 / z
+      for (const h of handlesOf(sel)) {
+        ctx.beginPath(); ctx.rect(h.x - hs / 2, h.y - hs / 2, hs, hs); ctx.fill(); ctx.stroke()
+      }
+      ctx.restore()
     }
   }
-  // canvas px -> CSS px offset within wrapper (for the inline editor)
-  const toCssXY = (cx, cy) => ({ left: cx * scaleRef.current, top: cy * scaleRef.current })
+  useEffect(() => { if (imgLoaded) redraw() }, [imgLoaded, shapes, selId, zoom])
 
+  const toCanvasXY = (e) => {
+    const c = canvasRef.current, rect = c.getBoundingClientRect()
+    return { x: (e.clientX - rect.left) * (c.width / rect.width), y: (e.clientY - rect.top) * (c.height / rect.height) }
+  }
+  const cssOf = (cx, cy) => ({ left: cx * zoom, top: cy * zoom })
+
+  // ---------- inline text editing ----------
+  const openEditorFor = (s) => {
+    setSelId(s.id)
+    setEditor({ kind: s.tool, cx: s.x, cy: s.y, target: s.target || null, text: s.text, editId: s.id })
+    setTimeout(() => editorInputRef.current?.focus(), 0)
+  }
   const commitEditor = () => {
     setEditor(ed => {
-      if (ed && ed.text && ed.text.trim()) {
+      if (!ed) return null
+      const txt = (ed.text || '').trim()
+      if (ed.editId != null) {
+        setShapes(prev => prev.map(s => s.id === ed.editId ? (txt ? { ...s, text: txt } : s) : s)
+          .filter(s => !(s.id === ed.editId && !txt)))
+      } else if (txt) {
         const shape = ed.kind === 'callout'
-          ? { tool: 'callout', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, target: ed.target, text: ed.text.trim() }
-          : { tool: 'text', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, text: ed.text.trim() }
+          ? { id: idRef.current++, tool: 'callout', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, target: ed.target, text: txt }
+          : { id: idRef.current++, tool: 'text', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, text: txt }
         setShapes(prev => [...prev, shape])
       }
       return null
     })
   }
 
+  // ---------- pointer interaction ----------
   const onDown = (e) => {
     if (editor) { commitEditor(); return }
     const p = toCanvasXY(e)
     const t = toolRef.current
-    if (t === 'select') return
-    if (t === 'text') {
-      setEditor({ kind: 'text', cx: p.x, cy: p.y, target: null, text: '' })
-      setTimeout(() => editorInputRef.current?.focus(), 0)
+
+    if (t === 'select') {
+      // 1) handle of selected shape?
+      const sel = shapesRef.current.find(s => s.id === selIdRef.current)
+      if (sel) {
+        const hs = 9 / zoomRef.current
+        for (const h of handlesOf(sel)) {
+          if (Math.abs(p.x - h.x) <= hs && Math.abs(p.y - h.y) <= hs) {
+            interRef.current = { mode: 'resize', id: sel.id, handle: h.id, start: p }
+            return
+          }
+        }
+      }
+      // 2) hit a shape -> select + move
+      const hitS = hitShape(p.x, p.y)
+      if (hitS) {
+        setSelId(hitS.id); selIdRef.current = hitS.id
+        interRef.current = { mode: 'move', id: hitS.id, last: p }
+        redraw()
+        return
+      }
+      // 3) empty -> deselect
+      setSelId(null); selIdRef.current = null; redraw()
       return
     }
-    if (t === 'callout') {
-      // first click = target point; drag to box; release places the text box
-      drawingRef.current = { tool: 'callout', target: { x: p.x, y: p.y }, x: p.x, y: p.y, _sx: p.x, _sy: p.y }
-      return
-    }
-    if (t === 'pen') {
-      drawingRef.current = { tool: 'pen', color: colorRef.current, width: widthRef.current, points: [p] }
-    } else {
-      drawingRef.current = { tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, w: 0, h: 0, x1: p.x, y1: p.y, x2: p.x, y2: p.y, _sx: p.x, _sy: p.y }
-    }
+
+    // drawing tools
+    setSelId(null); selIdRef.current = null
+    if (t === 'text') { setEditor({ kind: 'text', cx: p.x, cy: p.y, target: null, text: '', editId: null }); setTimeout(() => editorInputRef.current?.focus(), 0); return }
+    if (t === 'callout') { interRef.current = { mode: 'callout', target: { x: p.x, y: p.y }, x: p.x, y: p.y }; return }
+    if (t === 'pen') { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: 'pen', color: colorRef.current, width: widthRef.current, points: [p] } } }
+    else { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, w: 0, h: 0, x1: p.x, y1: p.y, x2: p.x, y2: p.y, _sx: p.x, _sy: p.y } } }
   }
+
   const onMove = (e) => {
-    const d = drawingRef.current
-    if (!d) return
+    const it = interRef.current
+    if (!it) return
     const p = toCanvasXY(e)
-    if (d.tool === 'pen') { d.points.push(p) }
-    else if (d.tool === 'arrow') { d.x2 = p.x; d.y2 = p.y }
-    else if (d.tool === 'callout') { d.x = p.x; d.y = p.y }
-    else { d.x = Math.min(d._sx, p.x); d.y = Math.min(d._sy, p.y); d.w = p.x - d._sx; d.h = p.y - d._sy }
-    if (d.tool === 'callout') {
-      redraw({ tool: 'callout', color: colorRef.current, width: widthRef.current, x: d.x, y: d.y, target: d.target, text: '…' })
-    } else {
-      redraw({ ...d, color: colorRef.current, width: widthRef.current })
+
+    if (it.mode === 'draw') {
+      const d = it.shape
+      if (d.tool === 'pen') d.points.push(p)
+      else if (d.tool === 'arrow') { d.x2 = p.x; d.y2 = p.y }
+      else { d.x = Math.min(d._sx, p.x); d.y = Math.min(d._sy, p.y); d.w = p.x - d._sx; d.h = p.y - d._sy }
+      redraw(d); return
+    }
+    if (it.mode === 'callout') {
+      it.x = p.x; it.y = p.y
+      redraw({ tool: 'callout', color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, target: it.target, text: '…' }); return
+    }
+    if (it.mode === 'move') {
+      const s = shapesRef.current.find(x => x.id === it.id); if (!s) return
+      const dx = p.x - it.last.x, dy = p.y - it.last.y; it.last = p
+      translateShape(s, dx, dy); redraw(); return
+    }
+    if (it.mode === 'resize') {
+      const s = shapesRef.current.find(x => x.id === it.id); if (!s) return
+      applyResize(s, it.handle, p); redraw(); return
     }
   }
+
   const onUp = (e) => {
-    const d = drawingRef.current
-    drawingRef.current = null
-    if (!d) return
-    if (d.tool === 'callout') {
+    const it = interRef.current; interRef.current = null
+    if (!it) return
+    if (it.mode === 'draw') {
+      const d = it.shape
+      const tiny = (d.tool === 'rect' || d.tool === 'cloud') && Math.abs(d.w) < 3 && Math.abs(d.h) < 3
+      const tinyArrow = d.tool === 'arrow' && Math.hypot(d.x2 - d.x1, d.y2 - d.y1) < 3
+      if (tiny || tinyArrow) { redraw(); return }
+      if (d.tool === 'rect' || d.tool === 'cloud') { d.x = Math.min(d.x, d.x + d.w); d.y = Math.min(d.y, d.y + d.h); d.w = Math.abs(d.w); d.h = Math.abs(d.h) }
+      setShapes(prev => [...prev, d])
+      return
+    }
+    if (it.mode === 'callout') {
       const p = toCanvasXY(e)
-      setEditor({ kind: 'callout', cx: p.x, cy: p.y, target: d.target, text: '' })
+      setEditor({ kind: 'callout', cx: p.x, cy: p.y, target: it.target, text: '', editId: null })
       setTimeout(() => editorInputRef.current?.focus(), 0)
       return
     }
-    const tiny = (d.tool === 'rect' || d.tool === 'cloud') && Math.abs(d.w) < 3 && Math.abs(d.h) < 3
-    const tinyArrow = d.tool === 'arrow' && Math.hypot(d.x2 - d.x1, d.y2 - d.y1) < 3
-    if (tiny || tinyArrow) { redraw(); return }
-    setShapes(prev => [...prev, d])
+    if (it.mode === 'move' || it.mode === 'resize') {
+      setShapes([...shapesRef.current]) // sync state
+    }
   }
+
+  const onDbl = (e) => {
+    const p = toCanvasXY(e)
+    const s = hitShape(p.x, p.y)
+    if (s && (s.tool === 'text' || s.tool === 'callout')) openEditorFor(s)
+  }
+
+  const translateShape = (s, dx, dy) => {
+    if (s.tool === 'pen') s.points.forEach(p => { p.x += dx; p.y += dy })
+    else if (s.tool === 'arrow') { s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy }
+    else { s.x += dx; s.y += dy } // rect/cloud/text/callout box (callout target stays anchored)
+  }
+  const applyResize = (s, handle, p) => {
+    if (s.tool === 'arrow') { if (handle === 'p1') { s.x1 = p.x; s.y1 = p.y } else { s.x2 = p.x; s.y2 = p.y }; return }
+    if (s.tool === 'callout') { if (handle === 'target') s.target = { x: p.x, y: p.y }; else { s.x = p.x; s.y = p.y }; return }
+    if (s.tool === 'rect' || s.tool === 'cloud') {
+      const b = bbox(s)
+      let x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.h
+      if (handle === 'tl') { x0 = p.x; y0 = p.y } else if (handle === 'tr') { x1 = p.x; y0 = p.y }
+      else if (handle === 'br') { x1 = p.x; y1 = p.y } else if (handle === 'bl') { x0 = p.x; y1 = p.y }
+      s.x = Math.min(x0, x1); s.y = Math.min(y0, y1); s.w = Math.abs(x1 - x0); s.h = Math.abs(y1 - y0)
+    }
+  }
+
+  // selected-shape style edits via toolbar
+  const applyColor = (c) => {
+    setColor(c)
+    if (selId != null) setShapes(prev => prev.map(s => s.id === selId ? { ...s, color: c } : s))
+  }
+  const applyWidth = (w) => {
+    setWidth(w)
+    if (selId != null) setShapes(prev => prev.map(s => s.id === selId ? { ...s, width: w } : s))
+  }
+  const deleteSelected = () => { if (selId != null) { setShapes(prev => prev.filter(s => s.id !== selId)); setSelId(null) } }
 
   const undo = () => setShapes(prev => prev.slice(0, -1))
-  const clearAll = () => setShapes([])
+  const clearAll = () => { setShapes([]); setSelId(null) }
 
-  const handleSend = () => {
-    commitEditor()
-    setTimeout(() => {
-      const c = canvasRef.current
-      if (!c) { onCancel(); return }
-      redraw()
-      c.toBlob((blob) => {
-        if (!blob) { onCancel(); return }
-        onSend(new File([blob], `annotated_${Date.now()}.png`, { type: 'image/png' }))
-      }, 'image/png')
-    }, 30)
-  }
-
-  // window drag (by header)
-  const onHeaderDown = (e) => {
-    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y }
-    const move = (ev) => {
-      if (!dragRef.current) return
-      setPos({ x: Math.max(0, ev.clientX - dragRef.current.dx), y: Math.max(0, ev.clientY - dragRef.current.dy) })
-    }
-    const up = () => { dragRef.current = null; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
-    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up)
-  }
-
-  // Esc exits the current tool / cancels editor
+  // keyboard: Esc exits tool/editor; Delete removes selection
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape') {
-        if (editor) { setEditor(null); return }
-        if (drawingRef.current) { drawingRef.current = null; redraw(); return }
-        setTool('select')
-      }
+      if (e.key === 'Escape') { if (editor) setEditor(null); else if (interRef.current) { interRef.current = null; redraw() } else { setSelId(null); setTool('select') } }
+      else if ((e.key === 'Delete' || e.key === 'Backspace') && !editor && selIdRef.current != null) { e.preventDefault(); deleteSelected() }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [editor])
+  }, [editor, selId])
 
-  const editorFs = Math.max(14, width * 6) * scaleRef.current
+  const handleSend = () => {
+    setSelId(null); selIdRef.current = null
+    commitEditor()
+    setTimeout(() => {
+      const c = canvasRef.current; if (!c) { onCancel(); return }
+      redraw()
+      c.toBlob((blob) => { if (!blob) { onCancel(); return } onSend(new File([blob], `annotated_${Date.now()}.png`, { type: 'image/png' })) }, 'image/png')
+    }, 40)
+  }
+
+  // ---------- window drag / resize / fullscreen ----------
+  const onHeaderDown = (e) => {
+    if (full) return
+    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y }
+    const move = (ev) => { if (dragRef.current) setPos({ x: Math.max(0, ev.clientX - dragRef.current.dx), y: Math.max(0, ev.clientY - dragRef.current.dy) }) }
+    const up = () => { dragRef.current = null; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up)
+  }
+  const onResizeDown = (e) => {
+    e.stopPropagation()
+    resizeRef.current = { sx: e.clientX, sy: e.clientY, w: size.w, h: size.h }
+    const move = (ev) => {
+      if (!resizeRef.current) return
+      setSize({ w: Math.max(420, resizeRef.current.w + (ev.clientX - resizeRef.current.sx)), h: Math.max(360, resizeRef.current.h + (ev.clientY - resizeRef.current.sy)) })
+    }
+    const up = () => { resizeRef.current = null; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up)
+  }
+
+  const winStyle = full
+    ? { left: 0, top: 0, width: '100vw', height: '100vh' }
+    : { left: pos.x, top: pos.y, width: size.w, height: size.h }
+
+  const pct = Math.round((zoom / (fitRef.current || 1)) * 100)
+  const editorFs = (selId == null ? width : (shapes.find(s => s.id === selId)?.width || width)) * 6 * zoom
 
   return (
-    <div ref={wrapRef}
-      className="fixed z-[60] bg-white rounded-lg shadow-2xl border border-gray-300 flex flex-col select-none"
-      style={{ left: pos.x, top: pos.y, width: dispW ? dispW + 24 : 'auto', maxWidth: 'calc(100vw - 20px)' }}>
+    <div className="fixed z-[60] bg-white shadow-2xl border border-gray-300 flex flex-col select-none"
+      style={{ ...winStyle, borderRadius: full ? 0 : 8 }}>
 
-      {/* draggable header */}
+      {/* header */}
       <div onMouseDown={onHeaderDown}
-        className="bg-gray-800 text-white px-3 py-2 rounded-t-lg flex items-center justify-between cursor-move">
+        className="bg-gray-800 text-white px-3 py-2 flex items-center justify-between cursor-move flex-shrink-0"
+        style={{ borderTopLeftRadius: full ? 0 : 8, borderTopRightRadius: full ? 0 : 8 }}>
         <span className="font-semibold text-sm">Annotate Screenshot</span>
-        <button onClick={onCancel} className="text-gray-300 hover:text-white text-lg leading-none">✕</button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setFull(f => !f)} className="text-gray-300 hover:text-white text-sm" title="Fullscreen">{full ? '🗗' : '🗖'}</button>
+          <button onClick={onCancel} className="text-gray-300 hover:text-white text-lg leading-none">✕</button>
+        </div>
       </div>
 
       {/* toolbar */}
-      <div className="px-2 py-2 border-b flex items-center gap-1.5 flex-wrap">
+      <div className="px-2 py-2 border-b flex items-center gap-1.5 flex-wrap flex-shrink-0">
         {ANNOT_TOOLS.map(t => (
-          <button key={t.id} onClick={() => { commitEditor(); setTool(t.id) }}
-            className={`px-2 py-1 rounded text-xs ${tool === t.id ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
-            {t.label}
-          </button>
+          <button key={t.id} onClick={() => { commitEditor(); setTool(t.id); if (t.id !== 'select') setSelId(null) }}
+            className={`px-2 py-1 rounded text-xs ${tool === t.id ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>{t.label}</button>
         ))}
         <span className="w-px h-5 bg-gray-300 mx-1" />
         {ANNOT_COLORS.map(c => (
-          <button key={c} onClick={() => setColor(c)}
-            className={`w-5 h-5 rounded ${color === c ? 'ring-2 ring-offset-1 ring-gray-700' : ''}`}
-            style={{ backgroundColor: c }} />
+          <button key={c} onClick={() => applyColor(c)}
+            className={`w-5 h-5 rounded ${color === c ? 'ring-2 ring-offset-1 ring-gray-700' : ''}`} style={{ backgroundColor: c }} />
         ))}
         <span className="w-px h-5 bg-gray-300 mx-1" />
         <span className="text-[11px] text-gray-500">Line</span>
-        <input type="range" min="1" max="12" value={width}
-          onChange={e => setWidth(parseInt(e.target.value))} className="w-20 accent-blue-600" />
+        <input type="range" min="1" max="12" value={width} onChange={e => applyWidth(parseInt(e.target.value))} className="w-16 accent-blue-600" />
+        <span className="w-px h-5 bg-gray-300 mx-1" />
+        <span className="text-[11px] text-gray-500">Zoom</span>
+        <input type="range" min="20" max="400" value={pct}
+          onChange={e => setZoom((parseInt(e.target.value) / 100) * (fitRef.current || 1))} className="w-20 accent-blue-600" />
+        <span className="text-[11px] text-gray-400 w-9">{pct}%</span>
+        <button onClick={fitToWindow} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">⤢ Fit</button>
         <span className="w-px h-5 bg-gray-300 mx-1" />
         <button onClick={undo} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">↶ Undo</button>
-        <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">🗑 Clear</button>
+        <button onClick={deleteSelected} disabled={selId == null}
+          className={`px-2 py-1 rounded text-xs ${selId == null ? 'bg-gray-50 text-gray-300' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>🗑 Delete</button>
+        <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">Clear</button>
       </div>
 
-      {/* canvas */}
-      <div className="p-3 bg-gray-100 flex items-center justify-center">
-        <div className="relative" style={{ width: dispW || 'auto', height: dispH || 'auto' }}>
+      {/* canvas scroll area */}
+      <div ref={scrollRef} className="flex-1 overflow-auto bg-gray-100 relative"
+        onWheel={e => { if (e.ctrlKey) { e.preventDefault(); setZoom(z => Math.max((fitRef.current || 1) * 0.2, Math.min((fitRef.current || 1) * 4, z - e.deltaY * 0.0015 * z))) } }}>
+        <div className="relative" style={{ width: imgLoaded ? natRef.current.w * zoom : 'auto', height: imgLoaded ? natRef.current.h * zoom : 'auto', margin: 'auto' }}>
           {imgLoaded ? (
             <canvas ref={canvasRef}
-              onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
-              style={{ width: dispW ? `${dispW}px` : 'auto', height: dispH ? `${dispH}px` : 'auto', cursor: tool === 'select' ? 'default' : 'crosshair', background: '#fff', display: 'block' }} />
+              onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp} onDoubleClick={onDbl}
+              style={{ width: natRef.current.w * zoom, height: natRef.current.h * zoom, cursor: tool === 'select' ? 'default' : 'crosshair', background: '#fff', display: 'block' }} />
           ) : <p className="text-gray-500 p-8">Loading…</p>}
 
-          {/* inline text/callout editor */}
           {editor && (
-            <textarea ref={editorInputRef}
-              value={editor.text}
+            <textarea ref={editorInputRef} value={editor.text}
               onChange={e => setEditor(ed => ({ ...ed, text: e.target.value }))}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitEditor() } }}
               onBlur={commitEditor}
               className="absolute outline-none bg-white/90 border border-blue-500 px-1 py-0 resize-none"
-              style={{
-                left: toCssXY(editor.cx, editor.cy).left,
-                top: toCssXY(editor.cx, editor.cy).top,
-                color, fontWeight: 'bold', fontSize: `${editorFs}px`, lineHeight: 1.2,
-                minWidth: '60px', minHeight: `${editorFs * 1.4}px`,
-              }} />
+              style={{ left: cssOf(editor.cx, editor.cy).left, top: cssOf(editor.cx, editor.cy).top, color, fontWeight: 'bold', fontSize: `${editorFs}px`, lineHeight: 1.2, minWidth: 60, minHeight: editorFs * 1.4 }} />
           )}
         </div>
       </div>
 
       {/* footer */}
-      <div className="px-3 py-2 border-t flex justify-between items-center rounded-b-lg">
+      <div className="px-3 py-2 border-t flex justify-between items-center flex-shrink-0">
         <span className="text-[11px] text-gray-400">
-          {tool === 'callout' ? 'Click a target point, drag to the text box, then type' :
-           tool === 'text' ? 'Click to place text, then type (Esc to exit)' :
-           'Esc to exit the current tool'}
+          {tool === 'select' ? 'Click to select · drag to move · handles to resize · double-click text to edit · Del to remove'
+            : tool === 'callout' ? 'Click target, drag to the box, then type'
+            : tool === 'text' ? 'Click to place text, then type'
+            : 'Esc to exit tool · Ctrl+scroll or slider to zoom'}
         </span>
         <div className="flex gap-2">
           <button onClick={onCancel} className="px-4 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm">Cancel</button>
           <button onClick={handleSend} className="px-5 py-1.5 rounded bg-green-600 hover:bg-green-700 text-white text-sm font-medium">Send →</button>
         </div>
       </div>
+
+      {/* resize handle */}
+      {!full && (
+        <div onMouseDown={onResizeDown}
+          className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize"
+          style={{ background: 'linear-gradient(135deg, transparent 50%, #9ca3af 50%)' }} />
+      )}
     </div>
   )
 }
