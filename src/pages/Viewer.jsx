@@ -102,6 +102,14 @@ export default function Viewer({
   const [selectedConv, setSelectedConv] = useState(null)
   const [convMessages, setConvMessages] = useState([])
   const [newConvMessage, setNewConvMessage] = useState('')
+  // attachments: a pending file (capture / file / paste) waiting to be sent,
+  // and a map messageId -> attachments for inline display.
+  const [pendingFile, setPendingFile] = useState(null)        // File
+  const [pendingPreview, setPendingPreview] = useState(null)  // object URL (image only)
+  const [attByMsg, setAttByMsg] = useState({})
+  const attByMsgRef = useRef({})
+  useEffect(() => { attByMsgRef.current = attByMsg }, [attByMsg])
+  const fileInputRef = useRef(null)
   const [showNewConvModal, setShowNewConvModal] = useState(false)
   const [ncType, setNcType] = useState('dm')
   const [ncName, setNcName] = useState('')
@@ -174,6 +182,7 @@ export default function Viewer({
   }, [worldReady, activeTab, selectedConv, projectId, activeFileId])
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [convMessages])
+  useEffect(() => { if (convMessages.length) loadMissingAttachments(convMessages) }, [convMessages])
 
   // ---------- camera fit over all loaded models ----------
   const fitToLoaded = async () => {
@@ -816,22 +825,107 @@ export default function Viewer({
   }
 
   // ---------- chat actions ----------
+  const clearPending = () => {
+    if (pendingPreview) { try { URL.revokeObjectURL(pendingPreview) } catch {} }
+    setPendingFile(null); setPendingPreview(null)
+  }
+
   const openConversation = (conv) => {
     setSelectedConv(conv)
+    setAttByMsg({}); attByMsgRef.current = {}
+    clearPending()
     loadConvMessages(conv.id)
   }
 
+  // capture the current 3D view as a PNG and stage it for sending
+  const captureScreenshot = async () => {
+    const world = worldRef.current
+    const container = containerRef.current
+    if (!world || !container) return
+    try {
+      const canvas = container.querySelector('canvas')
+      if (!canvas) { alert('3D canvas not ready.'); return }
+      // force a fresh render so the drawing buffer is populated before reading it
+      try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
+      const dataUrl = canvas.toDataURL('image/png')
+      const blob = await (await fetch(dataUrl)).blob()
+      const file = new File([blob], `screenshot_${Date.now()}.png`, { type: 'image/png' })
+      clearPending()
+      setPendingFile(file)
+      setPendingPreview(URL.createObjectURL(blob))
+    } catch (e) { alert('Capture failed: ' + e.message) }
+  }
+
+  const onPickFile = (e) => {
+    const f = e.target.files && e.target.files[0]
+    if (!f) return
+    if (f.size > 10 * 1024 * 1024) { alert('File too large (max 10 MB)'); e.target.value = ''; return }
+    clearPending()
+    setPendingFile(f)
+    if (f.type.startsWith('image/')) setPendingPreview(URL.createObjectURL(f))
+    e.target.value = ''
+  }
+
+  const onPasteInput = (e) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (const it of items) {
+      if (it.type && it.type.startsWith('image/')) {
+        const blob = it.getAsFile()
+        if (blob) {
+          const file = new File([blob], `paste_${Date.now()}.png`, { type: blob.type || 'image/png' })
+          clearPending()
+          setPendingFile(file)
+          setPendingPreview(URL.createObjectURL(file))
+          e.preventDefault()
+        }
+        break
+      }
+    }
+  }
+
+  const isImageAtt = (att) =>
+    att.resource_type === 'image' ||
+    (att.file_type && att.file_type.startsWith('image/')) ||
+    /\.(png|jpe?g|gif|webp)$/i.test(att.file_name || '')
+
+  const loadMissingAttachments = async (messages) => {
+    const have = attByMsgRef.current
+    const missing = messages.filter(m => !(m.id in have))
+    if (missing.length === 0) return
+    const updates = {}
+    await Promise.all(missing.map(async (m) => {
+      try {
+        const r = await axios.get(`${API}/attachments/message/${m.id}`, { headers })
+        updates[m.id] = r.data || []
+      } catch { updates[m.id] = [] }
+    }))
+    setAttByMsg(prev => ({ ...prev, ...updates }))
+  }
+
   const sendConvMessage = async () => {
-    if (!newConvMessage.trim() || !selectedConv) return
+    if ((!newConvMessage.trim() && !pendingFile) || !selectedConv) return
     const sel = selectedRef.current
     try {
-      await axios.post(`${API}/conversations/${selectedConv.id}/messages`, {
-        message: newConvMessage,
+      const msgText = newConvMessage.trim() ||
+        (pendingFile ? `📷 ${pendingFile.name}` : '')
+      const res = await axios.post(`${API}/conversations/${selectedConv.id}/messages`, {
+        message: msgText,
         element_id: sel?.elementId ?? -1,
         element_name: sel?.elementName ?? null,
         file_id: effectiveFileId()
       }, { headers })
+
+      const messageId = res.data.id
+      if (pendingFile && messageId) {
+        const fd = new FormData()
+        fd.append('file', pendingFile)
+        fd.append('message_id', messageId)
+        await axios.post(`${API}/attachments/upload`, fd, { headers: { Authorization: `Bearer ${token}` } })
+      }
+
       setNewConvMessage('')
+      clearPending()
       loadConvMessages(selectedConv.id)
     } catch (err) { alert('Send failed: ' + (err.response?.data?.error || err.message)) }
   }
@@ -842,6 +936,7 @@ export default function Viewer({
     try {
       await axios.delete(`${API}/conversations/${selectedConv.id}/members/${encodeURIComponent(userEmail)}`, { headers })
       setSelectedConv(null); setConvMessages([])
+      setAttByMsg({}); attByMsgRef.current = {}; clearPending()
       loadConversations()
     } catch (err) { alert('Failed: ' + (err.response?.data?.error || err.message)) }
   }
@@ -1337,7 +1432,7 @@ export default function Viewer({
             selectedConv ? (
               <>
                 <div className="px-3 py-2 border-b bg-blue-700 flex items-center gap-2">
-                  <button onClick={() => { setSelectedConv(null); setConvMessages([]) }}
+                  <button onClick={() => { setSelectedConv(null); setConvMessages([]); setAttByMsg({}); attByMsgRef.current = {}; clearPending() }}
                     className="text-white text-lg leading-none">←</button>
                   <div className="flex-1 min-w-0">
                     <p className="text-white text-sm font-semibold truncate">
@@ -1370,6 +1465,20 @@ export default function Viewer({
                         {m.element_name && (
                           <ElementLink elementId={m.element_id} fileId={m.file_id} name={m.element_name} className="mt-1 block" />
                         )}
+                        {(attByMsg[m.id] || []).map(att => (
+                          isImageAtt(att) ? (
+                            <a key={att.id} href={att.file_url} target="_blank" rel="noreferrer" className="block mt-2">
+                              <img src={att.file_url} alt={att.file_name}
+                                className="max-w-full max-h-56 rounded border border-gray-200" />
+                            </a>
+                          ) : (
+                            <a key={att.id} href={att.file_url} target="_blank" rel="noreferrer"
+                              className="mt-2 flex items-center gap-2 bg-white border border-gray-200 rounded px-2 py-1.5 hover:bg-gray-50">
+                              <span className="text-lg">📄</span>
+                              <span className="text-xs text-gray-700 truncate">{att.file_name}</span>
+                            </a>
+                          )
+                        ))}
                       </div>
                     </div>
                   ))}
@@ -1377,13 +1486,34 @@ export default function Viewer({
                 </div>
 
                 <ElementChip />
+
+                {pendingFile && (
+                  <div className="px-3 py-2 border-t bg-gray-50 flex items-center gap-2">
+                    {pendingPreview ? (
+                      <img src={pendingPreview} alt="preview" className="h-12 w-12 object-cover rounded border" />
+                    ) : (
+                      <span className="text-2xl">📄</span>
+                    )}
+                    <span className="flex-1 text-xs text-gray-600 truncate">{pendingFile.name}</span>
+                    <button onClick={clearPending}
+                      className="text-gray-500 hover:text-gray-700 text-xs">✕</button>
+                  </div>
+                )}
+
                 <div className="p-3 border-t flex gap-2 items-center">
+                  <input ref={fileInputRef} type="file" className="hidden"
+                    accept=".jpg,.jpeg,.png,.gif,.pdf,.dwg,.rvt" onChange={onPickFile} />
+                  <button onClick={captureScreenshot} title="Capture 3D view"
+                    className="bg-gray-100 hover:bg-gray-200 text-gray-700 w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0">📷</button>
+                  <button onClick={() => fileInputRef.current?.click()} title="Attach file"
+                    className="bg-gray-100 hover:bg-gray-200 text-gray-700 w-9 h-9 rounded-lg flex items-center justify-center text-lg flex-shrink-0">+</button>
                   <input value={newConvMessage} onChange={e => setNewConvMessage(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && sendConvMessage()}
+                    onPaste={onPasteInput}
                     placeholder={selected ? 'Message about this element...' : 'Type a message...'}
                     className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   <button onClick={sendConvMessage}
-                    className="bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-800">Send</button>
+                    className="bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-800 flex-shrink-0">Send</button>
                 </div>
               </>
             ) : (
