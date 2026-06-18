@@ -1401,12 +1401,12 @@ export default function Viewer({
     // First capture was stale ("works on the 2nd click") because the first
     // render only primes the GPU/geometry. So render once, wait a frame, render
     // again, then read — the 1st click already yields the correct frame.
-    // The model lives on renderer.domElement (confirmed). The WebGL backbuffer
-    // can be cleared after compositing, so the read MUST be synchronous, right
-    // after a manual render — no async waits in between (they let the buffer
-    // clear, which produced an empty/stale capture).
+    // That Open streams the model meshes via a worker, so fragments.core.update
+    // is ASYNC — we must AWAIT it (meshes ready) BEFORE rendering. Then render
+    // (twice: the 1st primes the GPU) and read SYNCHRONOUSLY right after, with
+    // no awaits in between (an await before the read lets the buffer clear).
     try { for (const [, m] of fragments.list) m.useCamera(world.camera.three) } catch {}
-    try { fragments?.core.update(true) } catch {}
+    try { await fragments?.core.update(true) } catch {}
     try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
     try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
 
