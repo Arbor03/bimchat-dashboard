@@ -1372,13 +1372,22 @@ export default function Viewer({
   }
 
   // capture the current 3D view as a PNG and stage it for sending
-  // Grab the rendered 3D canvas as a PNG File. `crop` (CSS px rel. to canvas
-  // The WebGL canvas the renderer actually draws into (the model lives here).
-  // querySelector('canvas') can return a different/secondary canvas, so always
-  // use the renderer's own domElement.
-  const getGLCanvas = () =>
-    worldRef.current?.renderer?.three?.domElement ||
-    containerRef.current?.querySelector('canvas') || null
+  // Pick the canvas that actually holds the rendered model. There can be more
+  // than one <canvas> (OBC helpers/2D overlays), so choose the LARGEST by area,
+  // preferring the renderer's own domElement when it's the big one.
+  const getGLCanvas = () => {
+    const container = containerRef.current
+    const rendererCanvas = worldRef.current?.renderer?.three?.domElement || null
+    let best = rendererCanvas
+    let bestArea = best ? best.width * best.height : 0
+    if (container) {
+      for (const c of container.querySelectorAll('canvas')) {
+        const area = c.width * c.height
+        if (area > bestArea) { best = c; bestArea = area }
+      }
+    }
+    return best
+  }
 
   // top-left) limits it to a region; null = full view.
   const grabCanvasFile = async (crop) => {
@@ -1393,11 +1402,10 @@ export default function Viewer({
     // render only primes the GPU/geometry. So render once, wait a frame, render
     // again, then read — the 1st click already yields the correct frame.
     try { for (const [, m] of fragments.list) m.useCamera(world.camera.three) } catch {}
-    try { fragments?.core.update(true) } catch {}
-    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
+    try { await fragments?.core.update(true) } catch {}
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+    try { await fragments?.core.update(true) } catch {}
     await new Promise(r => requestAnimationFrame(r))
-    try { fragments?.core.update(true) } catch {}
-    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
 
     let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
