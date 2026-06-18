@@ -30,14 +30,9 @@ function emailFromToken(token) {
   } catch { return null }
 }
 
-// ===================================================================
-// Annotate Screenshot modal — mirrors the Revit add-in's tool set.
-// Vector annotations kept in an array so Undo/Clear are trivial; on Send
-// the base image + annotations are flattened into one PNG File.
-// NOTE: quality/UX to be reworked in a second round (parity-first for now).
-// ===================================================================
 const ANNOT_COLORS = ['#e74c3c', '#f1c40f', '#2ecc71', '#3498db', '#000000']
 const ANNOT_TOOLS = [
+  { id: 'select', label: '⤢ Select' },
   { id: 'pen', label: '✏️ Pen' },
   { id: 'text', label: '🅰 Text' },
   { id: 'cloud', label: '☁ Cloud' },
@@ -46,53 +41,58 @@ const ANNOT_TOOLS = [
   { id: 'rect', label: '▭ Rect' },
 ]
 
+// Floating, draggable annotate window (does NOT block the rest of the app).
+// Tools mirror the Revit add-in. Text is edited inline; Callout is a text box
+// with a leader line pointing at a target; Cloud is a proper scalloped loop.
+// NOTE: still a work-in-progress visual quality — to be refined further.
 function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const canvasRef = useRef(null)
+  const wrapRef = useRef(null)
   const imgRef = useRef(null)
   const [imgLoaded, setImgLoaded] = useState(false)
   const [tool, setTool] = useState('pen')
   const [color, setColor] = useState('#e74c3c')
   const [width, setWidth] = useState(3)
-  const [zoom, setZoom] = useState(1)              // 1 = fit-to-window (= "100%")
-  const fitWidthRef = useRef(0)                    // CSS px width at zoom 1
+
   const [shapes, setShapes] = useState([])
   const shapesRef = useRef([])
   useEffect(() => { shapesRef.current = shapes }, [shapes])
 
-  const drawingRef = useRef(null)   // shape currently being drawn
+  // display sizing (CSS px). dispW = canvas pixel width * scale
+  const [dispW, setDispW] = useState(0)
+  const scaleRef = useRef(1) // canvas pixels -> CSS px
+
+  // floating window position
+  const [pos, setPos] = useState({ x: 80, y: 80 })
+  const dragRef = useRef(null)
+
+  // inline text editor overlay
+  const [editor, setEditor] = useState(null) // { kind:'text'|'callout', cx, cy, target, text }
+  const editorInputRef = useRef(null)
+
+  const drawingRef = useRef(null)
   const toolRef = useRef(tool); useEffect(() => { toolRef.current = tool }, [tool])
   const colorRef = useRef(color); useEffect(() => { colorRef.current = color }, [color])
   const widthRef = useRef(width); useEffect(() => { widthRef.current = width }, [width])
 
-  // load the base image, size the canvas to its natural pixels
+  // load base image
   useEffect(() => {
     const img = new Image()
     img.onload = () => {
       imgRef.current = img
       const c = canvasRef.current
       if (c) { c.width = img.naturalWidth; c.height = img.naturalHeight }
-      // fit width to the available area (~ modal width minus padding)
-      const avail = Math.min(window.innerWidth - 120, 1100)
-      const availH = window.innerHeight - 240
-      let w = img.naturalWidth, h = img.naturalHeight
-      const scale = Math.min(avail / w, availH / h, 1)
-      fitWidthRef.current = Math.round(w * scale)
+      const avail = Math.min(window.innerWidth - 160, 1000)
+      const availH = window.innerHeight - 320
+      const scale = Math.min(avail / img.naturalWidth, availH / img.naturalHeight, 1)
+      scaleRef.current = scale
+      setDispW(Math.round(img.naturalWidth * scale))
       setImgLoaded(true)
     }
     img.src = imageUrl
   }, [imageUrl])
 
-  const drawCloud = (ctx, x, y, w, h) => {
-    const r = Math.max(6, Math.min(Math.abs(w), Math.abs(h)) / 8)
-    const x0 = Math.min(x, x + w), y0 = Math.min(y, y + h)
-    const ww = Math.abs(w), hh = Math.abs(h)
-    ctx.beginPath()
-    const arc = (cx, cy) => ctx.arc(cx, cy, r, 0, Math.PI * 2)
-    for (let px = x0; px < x0 + ww; px += r * 1.6) { arc(px, y0); arc(px, y0 + hh) }
-    for (let py = y0; py < y0 + hh; py += r * 1.6) { arc(x0, py); arc(x0 + ww, py) }
-    ctx.stroke()
-  }
-
+  // ---- drawing primitives ----
   const drawArrow = (ctx, x1, y1, x2, y2, lw) => {
     const head = Math.max(10, lw * 3)
     const ang = Math.atan2(y2 - y1, x2 - x1)
@@ -102,6 +102,65 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     ctx.lineTo(x2 - head * Math.cos(ang - Math.PI / 6), y2 - head * Math.sin(ang - Math.PI / 6))
     ctx.lineTo(x2 - head * Math.cos(ang + Math.PI / 6), y2 - head * Math.sin(ang + Math.PI / 6))
     ctx.closePath(); ctx.fillStyle = ctx.strokeStyle; ctx.fill()
+  }
+
+  // closed scalloped revision cloud around the given rect
+  const drawCloud = (ctx, x, y, w, h) => {
+    const x0 = Math.min(x, x + w), y0 = Math.min(y, y + h)
+    const ww = Math.abs(w), hh = Math.abs(h)
+    if (ww < 6 || hh < 6) return
+    const r = Math.max(8, Math.min(ww, hh) / 6) // scallop radius
+    const scallop = (ax, ay, bx, by, nx, ny) => {
+      const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy)
+      const n = Math.max(2, Math.round(len / (r * 1.8)))
+      for (let i = 0; i < n; i++) {
+        const ex = ax + dx * (i + 1) / n, ey = ay + dy * (i + 1) / n
+        const sx = ax + dx * i / n, sy = ay + dy * i / n
+        const cx = (sx + ex) / 2 + nx * r, cy = (sy + ey) / 2 + ny * r
+        ctx.quadraticCurveTo(cx, cy, ex, ey)
+      }
+    }
+    ctx.beginPath()
+    ctx.moveTo(x0, y0)
+    scallop(x0, y0, x0 + ww, y0, 0, -1)        // top  (outward up)
+    scallop(x0 + ww, y0, x0 + ww, y0 + hh, 1, 0) // right
+    scallop(x0 + ww, y0 + hh, x0, y0 + hh, 0, 1)  // bottom
+    scallop(x0, y0 + hh, x0, y0, -1, 0)          // left
+    ctx.closePath()
+    ctx.stroke()
+  }
+
+  const drawText = (ctx, s) => {
+    const fs = Math.max(14, s.width * 6)
+    ctx.font = `bold ${fs}px sans-serif`
+    ctx.textBaseline = 'top'
+    ctx.fillStyle = s.color
+    const lines = String(s.text).split('\n')
+    lines.forEach((ln, i) => ctx.fillText(ln, s.x, s.y + i * fs * 1.2))
+  }
+
+  const drawCallout = (ctx, s) => {
+    const fs = Math.max(14, s.width * 6)
+    ctx.font = `bold ${fs}px sans-serif`
+    const pad = 6
+    const lines = String(s.text).split('\n')
+    const tw = Math.max(...lines.map(l => ctx.measureText(l).width))
+    const bw = tw + pad * 2, bh = lines.length * fs * 1.2 + pad * 2
+    // leader from target to nearest box corner
+    if (s.target) {
+      ctx.strokeStyle = s.color; ctx.lineWidth = s.width
+      ctx.beginPath(); ctx.moveTo(s.target.x, s.target.y); ctx.lineTo(s.x, s.y + bh); ctx.stroke()
+      ctx.beginPath(); ctx.arc(s.target.x, s.target.y, Math.max(3, s.width), 0, Math.PI * 2)
+      ctx.fillStyle = s.color; ctx.fill()
+    }
+    // box
+    ctx.fillStyle = 'rgba(255,255,255,0.92)'
+    ctx.fillRect(s.x, s.y, bw, bh)
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width
+    ctx.strokeRect(s.x, s.y, bw, bh)
+    // text
+    ctx.fillStyle = s.color; ctx.textBaseline = 'top'
+    lines.forEach((ln, i) => ctx.fillText(ln, s.x + pad, s.y + pad + i * fs * 1.2))
   }
 
   const drawShape = (ctx, s) => {
@@ -118,23 +177,9 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     } else if (s.tool === 'cloud') {
       drawCloud(ctx, s.x, s.y, s.w, s.h)
     } else if (s.tool === 'text') {
-      const fs = Math.max(14, s.width * 6)
-      ctx.font = `bold ${fs}px sans-serif`
-      ctx.textBaseline = 'top'
-      ctx.fillText(s.text, s.x, s.y)
+      drawText(ctx, s)
     } else if (s.tool === 'callout') {
-      const fs = Math.max(14, s.width * 6)
-      ctx.font = `bold ${fs}px sans-serif`
-      const pad = 8
-      const tw = ctx.measureText(s.text).width
-      const bw = Math.max(40, tw + pad * 2), bh = fs + pad * 2
-      ctx.fillStyle = 'rgba(255,255,255,0.9)'
-      ctx.strokeRect(s.x, s.y, bw, bh)
-      ctx.fillRect(s.x, s.y, bw, bh)
-      ctx.strokeStyle = s.color; ctx.strokeRect(s.x, s.y, bw, bh)
-      ctx.beginPath(); ctx.moveTo(s.x, s.y + bh); ctx.lineTo(s.x - 14, s.y + bh + 18); ctx.lineTo(s.x + 16, s.y + bh); ctx.stroke()
-      ctx.fillStyle = s.color; ctx.textBaseline = 'top'
-      ctx.fillText(s.text, s.x + pad, s.y + pad)
+      drawCallout(ctx, s)
     }
   }
 
@@ -157,15 +202,34 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       y: (e.clientY - rect.top) * (c.height / rect.height),
     }
   }
+  // canvas px -> CSS px offset within wrapper (for the inline editor)
+  const toCssXY = (cx, cy) => ({ left: cx * scaleRef.current, top: cy * scaleRef.current })
+
+  const commitEditor = () => {
+    setEditor(ed => {
+      if (ed && ed.text && ed.text.trim()) {
+        const shape = ed.kind === 'callout'
+          ? { tool: 'callout', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, target: ed.target, text: ed.text.trim() }
+          : { tool: 'text', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, text: ed.text.trim() }
+        setShapes(prev => [...prev, shape])
+      }
+      return null
+    })
+  }
 
   const onDown = (e) => {
+    if (editor) { commitEditor(); return }
     const p = toCanvasXY(e)
     const t = toolRef.current
-    if (t === 'text' || t === 'callout') {
-      const text = window.prompt(t === 'text' ? 'Text:' : 'Callout text:')
-      if (text && text.trim()) {
-        setShapes(prev => [...prev, { tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, text: text.trim() }])
-      }
+    if (t === 'select') return
+    if (t === 'text') {
+      setEditor({ kind: 'text', cx: p.x, cy: p.y, target: null, text: '' })
+      setTimeout(() => editorInputRef.current?.focus(), 0)
+      return
+    }
+    if (t === 'callout') {
+      // first click = target point; drag to box; release places the text box
+      drawingRef.current = { tool: 'callout', target: { x: p.x, y: p.y }, x: p.x, y: p.y, _sx: p.x, _sy: p.y }
       return
     }
     if (t === 'pen') {
@@ -180,14 +244,25 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     const p = toCanvasXY(e)
     if (d.tool === 'pen') { d.points.push(p) }
     else if (d.tool === 'arrow') { d.x2 = p.x; d.y2 = p.y }
+    else if (d.tool === 'callout') { d.x = p.x; d.y = p.y }
     else { d.x = Math.min(d._sx, p.x); d.y = Math.min(d._sy, p.y); d.w = p.x - d._sx; d.h = p.y - d._sy }
-    redraw(d)
+    if (d.tool === 'callout') {
+      redraw({ tool: 'callout', color: colorRef.current, width: widthRef.current, x: d.x, y: d.y, target: d.target, text: '…' })
+    } else {
+      redraw({ ...d, color: colorRef.current, width: widthRef.current })
+    }
   }
-  const onUp = () => {
+  const onUp = (e) => {
     const d = drawingRef.current
     drawingRef.current = null
     if (!d) return
-    const tiny = d.tool !== 'pen' && d.tool !== 'arrow' && Math.abs(d.w) < 3 && Math.abs(d.h) < 3
+    if (d.tool === 'callout') {
+      const p = toCanvasXY(e)
+      setEditor({ kind: 'callout', cx: p.x, cy: p.y, target: d.target, text: '' })
+      setTimeout(() => editorInputRef.current?.focus(), 0)
+      return
+    }
+    const tiny = (d.tool === 'rect' || d.tool === 'cloud') && Math.abs(d.w) < 3 && Math.abs(d.h) < 3
     const tinyArrow = d.tool === 'arrow' && Math.hypot(d.x2 - d.x1, d.y2 - d.y1) < 3
     if (tiny || tinyArrow) { redraw(); return }
     setShapes(prev => [...prev, d])
@@ -197,60 +272,117 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const clearAll = () => setShapes([])
 
   const handleSend = () => {
-    const c = canvasRef.current
-    if (!c) return
-    c.toBlob((blob) => {
-      if (!blob) { onCancel(); return }
-      const file = new File([blob], `annotated_${Date.now()}.png`, { type: 'image/png' })
-      onSend(file)
-    }, 'image/png')
+    commitEditor()
+    setTimeout(() => {
+      const c = canvasRef.current
+      if (!c) { onCancel(); return }
+      redraw()
+      c.toBlob((blob) => {
+        if (!blob) { onCancel(); return }
+        onSend(new File([blob], `annotated_${Date.now()}.png`, { type: 'image/png' }))
+      }, 'image/png')
+    }, 30)
   }
 
-  const dispWidth = Math.round(fitWidthRef.current * zoom)
+  // window drag (by header)
+  const onHeaderDown = (e) => {
+    dragRef.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y }
+    const move = (ev) => {
+      if (!dragRef.current) return
+      setPos({ x: Math.max(0, ev.clientX - dragRef.current.dx), y: Math.max(0, ev.clientY - dragRef.current.dy) })
+    }
+    const up = () => { dragRef.current = null; window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up)
+  }
+
+  // Esc exits the current tool / cancels editor
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (editor) { setEditor(null); return }
+        if (drawingRef.current) { drawingRef.current = null; redraw(); return }
+        setTool('select')
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editor])
+
+  const editorFs = Math.max(14, width * 6) * scaleRef.current
 
   return (
-    <div className="fixed inset-0 bg-black/70 z-[60] flex flex-col">
+    <div ref={wrapRef}
+      className="fixed z-[60] bg-white rounded-lg shadow-2xl border border-gray-300 flex flex-col select-none"
+      style={{ left: pos.x, top: pos.y, width: dispW ? dispW + 24 : 'auto', maxWidth: 'calc(100vw - 20px)' }}>
+
+      {/* draggable header */}
+      <div onMouseDown={onHeaderDown}
+        className="bg-gray-800 text-white px-3 py-2 rounded-t-lg flex items-center justify-between cursor-move">
+        <span className="font-semibold text-sm">Annotate Screenshot</span>
+        <button onClick={onCancel} className="text-gray-300 hover:text-white text-lg leading-none">✕</button>
+      </div>
+
       {/* toolbar */}
-      <div className="bg-gray-800 text-white px-4 py-2 flex items-center gap-3 flex-wrap">
-        <span className="font-semibold mr-2">Annotate Screenshot</span>
+      <div className="px-2 py-2 border-b flex items-center gap-1.5 flex-wrap">
         {ANNOT_TOOLS.map(t => (
-          <button key={t.id} onClick={() => setTool(t.id)}
-            className={`px-2.5 py-1 rounded text-sm ${tool === t.id ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
+          <button key={t.id} onClick={() => { commitEditor(); setTool(t.id) }}
+            className={`px-2 py-1 rounded text-xs ${tool === t.id ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>
             {t.label}
           </button>
         ))}
-        <span className="w-px h-6 bg-gray-600 mx-1" />
+        <span className="w-px h-5 bg-gray-300 mx-1" />
         {ANNOT_COLORS.map(c => (
           <button key={c} onClick={() => setColor(c)}
-            className={`w-6 h-6 rounded ${color === c ? 'ring-2 ring-white' : ''}`}
+            className={`w-5 h-5 rounded ${color === c ? 'ring-2 ring-offset-1 ring-gray-700' : ''}`}
             style={{ backgroundColor: c }} />
         ))}
-        <span className="w-px h-6 bg-gray-600 mx-1" />
-        <span className="text-xs">Line</span>
+        <span className="w-px h-5 bg-gray-300 mx-1" />
+        <span className="text-[11px] text-gray-500">Line</span>
         <input type="range" min="1" max="12" value={width}
-          onChange={e => setWidth(parseInt(e.target.value))} className="w-24 accent-blue-500" />
-        <span className="w-px h-6 bg-gray-600 mx-1" />
-        <button onClick={undo} className="px-2.5 py-1 rounded text-sm bg-gray-700 hover:bg-gray-600">↶ Undo</button>
-        <button onClick={clearAll} className="px-2.5 py-1 rounded text-sm bg-gray-700 hover:bg-gray-600">🗑 Clear</button>
-        <button onClick={() => setZoom(1)} className="px-2.5 py-1 rounded text-sm bg-gray-700 hover:bg-gray-600">⤢ Fit</button>
-        <span className="text-xs text-gray-300">{Math.round(zoom * 100)}%</span>
+          onChange={e => setWidth(parseInt(e.target.value))} className="w-20 accent-blue-600" />
+        <span className="w-px h-5 bg-gray-300 mx-1" />
+        <button onClick={undo} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">↶ Undo</button>
+        <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">🗑 Clear</button>
       </div>
 
-      {/* canvas area */}
-      <div className="flex-1 overflow-auto flex items-center justify-center p-4"
-        onWheel={e => { if (e.ctrlKey) { e.preventDefault(); setZoom(z => Math.max(0.2, Math.min(4, z - e.deltaY * 0.001))) } }}>
-        {imgLoaded ? (
-          <canvas ref={canvasRef}
-            onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
-            style={{ width: dispWidth ? `${dispWidth}px` : 'auto', cursor: 'crosshair', background: '#fff' }}
-            className="shadow-lg" />
-        ) : <p className="text-white">Loading…</p>}
+      {/* canvas */}
+      <div className="p-3 bg-gray-100 flex items-center justify-center">
+        <div className="relative" style={{ width: dispW || 'auto' }}>
+          {imgLoaded ? (
+            <canvas ref={canvasRef}
+              onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
+              style={{ width: dispW ? `${dispW}px` : 'auto', cursor: tool === 'select' ? 'default' : 'crosshair', background: '#fff', display: 'block' }} />
+          ) : <p className="text-gray-500 p-8">Loading…</p>}
+
+          {/* inline text/callout editor */}
+          {editor && (
+            <textarea ref={editorInputRef}
+              value={editor.text}
+              onChange={e => setEditor(ed => ({ ...ed, text: e.target.value }))}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitEditor() } }}
+              onBlur={commitEditor}
+              className="absolute outline-none bg-white/90 border border-blue-500 px-1 py-0 resize-none"
+              style={{
+                left: toCssXY(editor.cx, editor.cy).left,
+                top: toCssXY(editor.cx, editor.cy).top,
+                color, fontWeight: 'bold', fontSize: `${editorFs}px`, lineHeight: 1.2,
+                minWidth: '60px', minHeight: `${editorFs * 1.4}px`,
+              }} />
+          )}
+        </div>
       </div>
 
       {/* footer */}
-      <div className="bg-gray-800 px-4 py-3 flex justify-end gap-2">
-        <button onClick={onCancel} className="px-4 py-2 rounded bg-gray-600 hover:bg-gray-500 text-white text-sm">Cancel</button>
-        <button onClick={handleSend} className="px-5 py-2 rounded bg-green-600 hover:bg-green-700 text-white text-sm font-medium">Send →</button>
+      <div className="px-3 py-2 border-t flex justify-between items-center rounded-b-lg">
+        <span className="text-[11px] text-gray-400">
+          {tool === 'callout' ? 'Click a target point, drag to the text box, then type' :
+           tool === 'text' ? 'Click to place text, then type (Esc to exit)' :
+           'Esc to exit the current tool'}
+        </span>
+        <div className="flex gap-2">
+          <button onClick={onCancel} className="px-4 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm">Cancel</button>
+          <button onClick={handleSend} className="px-5 py-1.5 rounded bg-green-600 hover:bg-green-700 text-white text-sm font-medium">Send →</button>
+        </div>
       </div>
     </div>
   )
@@ -340,6 +472,7 @@ export default function Viewer({
   const [regionMode, setRegionMode] = useState(false)
   const [regionRect, setRegionRect] = useState(null)
   const regionStartRef = useRef(null)
+  const regionRectRef = useRef(null)
   const [annotUrl, setAnnotUrl] = useState(null)   // object URL of a freshly captured shot
   const [showNewConvModal, setShowNewConvModal] = useState(false)
   const [ncType, setNcType] = useState('dm')
@@ -1090,14 +1223,19 @@ export default function Viewer({
       const rect = canvas.getBoundingClientRect()
       const sx = canvas.width / rect.width
       const sy = canvas.height / rect.height
+      // source rect in canvas pixels, clamped inside the canvas
+      let srcX = Math.round(crop.x * sx)
+      let srcY = Math.round(crop.y * sy)
+      let srcW = Math.round(crop.w * sx)
+      let srcH = Math.round(crop.h * sy)
+      srcX = Math.max(0, Math.min(srcX, canvas.width - 1))
+      srcY = Math.max(0, Math.min(srcY, canvas.height - 1))
+      srcW = Math.max(1, Math.min(srcW, canvas.width - srcX))
+      srcH = Math.max(1, Math.min(srcH, canvas.height - srcY))
       const c = document.createElement('canvas')
-      c.width = Math.max(1, Math.round(crop.w * sx))
-      c.height = Math.max(1, Math.round(crop.h * sy))
+      c.width = srcW; c.height = srcH
       const ctx = c.getContext('2d')
-      ctx.drawImage(canvas,
-        Math.round(crop.x * sx), Math.round(crop.y * sy),
-        Math.round(crop.w * sx), Math.round(crop.h * sy),
-        0, 0, c.width, c.height)
+      ctx.drawImage(canvas, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH)
       outCanvas = c
     }
 
@@ -1143,7 +1281,9 @@ export default function Viewer({
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
     regionStartRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
-    setRegionRect({ x: regionStartRef.current.x, y: regionStartRef.current.y, w: 0, h: 0 })
+    const r0 = { x: regionStartRef.current.x, y: regionStartRef.current.y, w: 0, h: 0 }
+    regionRectRef.current = r0
+    setRegionRect(r0)
   }
   const onRegionMouseMove = (e) => {
     if (!regionStartRef.current) return
@@ -1152,14 +1292,17 @@ export default function Viewer({
     const rect = canvas.getBoundingClientRect()
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top
     const s = regionStartRef.current
-    setRegionRect({ x: Math.min(s.x, cx), y: Math.min(s.y, cy), w: Math.abs(cx - s.x), h: Math.abs(cy - s.y) })
+    const r = { x: Math.min(s.x, cx), y: Math.min(s.y, cy), w: Math.abs(cx - s.x), h: Math.abs(cy - s.y) }
+    regionRectRef.current = r
+    setRegionRect(r)
   }
   const onRegionMouseUp = async () => {
-    const r = regionRect
+    const r = regionRectRef.current   // read the latest rect (state can lag)
     setRegionMode(false)
     regionStartRef.current = null
-    if (r && r.w > 4 && r.h > 4) openAnnot(await grabCanvasFile(r))
+    regionRectRef.current = null
     setRegionRect(null)
+    if (r && r.w > 4 && r.h > 4) openAnnot(await grabCanvasFile(r))
   }
 
   const onPickFile = (e) => {
