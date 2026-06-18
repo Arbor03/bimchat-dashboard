@@ -110,6 +110,10 @@ export default function Viewer({
   const attByMsgRef = useRef({})
   useEffect(() => { attByMsgRef.current = attByMsg }, [attByMsg])
   const fileInputRef = useRef(null)
+  const [captureMenuOpen, setCaptureMenuOpen] = useState(false)
+  const [regionMode, setRegionMode] = useState(false)
+  const [regionRect, setRegionRect] = useState(null)
+  const regionStartRef = useRef(null)
   const [showNewConvModal, setShowNewConvModal] = useState(false)
   const [ncType, setNcType] = useState('dm')
   const [ncName, setNcName] = useState('')
@@ -183,6 +187,12 @@ export default function Viewer({
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [convMessages])
   useEffect(() => { if (convMessages.length) loadMissingAttachments(convMessages) }, [convMessages])
+  useEffect(() => {
+    if (!regionMode) return
+    const onKey = (e) => { if (e.key === 'Escape') { setRegionMode(false); setRegionRect(null); regionStartRef.current = null } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [regionMode])
 
   // ---------- camera fit over all loaded models ----------
   const fitToLoaded = async () => {
@@ -838,22 +848,80 @@ export default function Viewer({
   }
 
   // capture the current 3D view as a PNG and stage it for sending
-  const captureScreenshot = async () => {
+  // Grab the rendered 3D canvas as a PNG File. `crop` (CSS px rel. to canvas
+  // top-left) limits it to a region; null = full view.
+  const grabCanvasFile = async (crop) => {
     const world = worldRef.current
     const container = containerRef.current
-    if (!world || !container) return
+    if (!world || !container) return null
+    const canvas = container.querySelector('canvas')
+    if (!canvas) { alert('3D canvas not ready.'); return null }
+    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
+
+    let outCanvas = canvas
+    if (crop && crop.w > 4 && crop.h > 4) {
+      const rect = canvas.getBoundingClientRect()
+      const sx = canvas.width / rect.width
+      const sy = canvas.height / rect.height
+      const c = document.createElement('canvas')
+      c.width = Math.max(1, Math.round(crop.w * sx))
+      c.height = Math.max(1, Math.round(crop.h * sy))
+      const ctx = c.getContext('2d')
+      ctx.drawImage(canvas,
+        Math.round(crop.x * sx), Math.round(crop.y * sy),
+        Math.round(crop.w * sx), Math.round(crop.h * sy),
+        0, 0, c.width, c.height)
+      outCanvas = c
+    }
+
     try {
-      const canvas = container.querySelector('canvas')
-      if (!canvas) { alert('3D canvas not ready.'); return }
-      // force a fresh render so the drawing buffer is populated before reading it
-      try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
-      const dataUrl = canvas.toDataURL('image/png')
+      const dataUrl = outCanvas.toDataURL('image/png')
       const blob = await (await fetch(dataUrl)).blob()
-      const file = new File([blob], `screenshot_${Date.now()}.png`, { type: 'image/png' })
-      clearPending()
-      setPendingFile(file)
-      setPendingPreview(URL.createObjectURL(blob))
-    } catch (e) { alert('Capture failed: ' + e.message) }
+      return new File([blob], `screenshot_${Date.now()}.png`, { type: 'image/png' })
+    } catch (e) { alert('Capture failed: ' + e.message); return null }
+  }
+
+  const stagePending = (file) => {
+    if (!file) return
+    clearPending()
+    setPendingFile(file)
+    setPendingPreview(URL.createObjectURL(file))
+  }
+
+  const captureActiveView = async () => {
+    setCaptureMenuOpen(false)
+    stagePending(await grabCanvasFile(null))
+  }
+
+  const startRegionCapture = () => {
+    setCaptureMenuOpen(false)
+    setRegionRect(null)
+    regionStartRef.current = null
+    setRegionMode(true)
+  }
+
+  const onRegionMouseDown = (e) => {
+    const canvas = containerRef.current?.querySelector('canvas')
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    regionStartRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    setRegionRect({ x: regionStartRef.current.x, y: regionStartRef.current.y, w: 0, h: 0 })
+  }
+  const onRegionMouseMove = (e) => {
+    if (!regionStartRef.current) return
+    const canvas = containerRef.current?.querySelector('canvas')
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    const cx = e.clientX - rect.left, cy = e.clientY - rect.top
+    const s = regionStartRef.current
+    setRegionRect({ x: Math.min(s.x, cx), y: Math.min(s.y, cy), w: Math.abs(cx - s.x), h: Math.abs(cy - s.y) })
+  }
+  const onRegionMouseUp = async () => {
+    const r = regionRect
+    setRegionMode(false)
+    regionStartRef.current = null
+    if (r && r.w > 4 && r.h > 4) stagePending(await grabCanvasFile(r))
+    setRegionRect(null)
   }
 
   const onPickFile = (e) => {
@@ -1237,6 +1305,21 @@ export default function Viewer({
         <div className="flex-1 relative">
           <div ref={containerRef} className="absolute inset-0" />
 
+          {/* region capture overlay */}
+          {regionMode && (
+            <div className="absolute inset-0 z-30 cursor-crosshair"
+              onMouseDown={onRegionMouseDown} onMouseMove={onRegionMouseMove} onMouseUp={onRegionMouseUp}>
+              <div className="absolute inset-0 bg-black/20" />
+              {regionRect && regionRect.w > 0 && (
+                <div className="absolute border-2 border-blue-400 bg-blue-400/10"
+                  style={{ left: regionRect.x, top: regionRect.y, width: regionRect.w, height: regionRect.h }} />
+              )}
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-black/70 text-white text-xs px-3 py-1.5 rounded-full">
+                Drag to select a region · Esc to cancel
+              </div>
+            </div>
+          )}
+
           {/* close button */}
           <button onClick={onClose}
             className="absolute top-4 left-4 z-10 bg-white/90 hover:bg-white text-gray-700 px-3 py-1.5 rounded shadow text-sm">
@@ -1503,8 +1586,21 @@ export default function Viewer({
                 <div className="p-3 border-t flex gap-2 items-center">
                   <input ref={fileInputRef} type="file" className="hidden"
                     accept=".jpg,.jpeg,.png,.gif,.pdf,.dwg,.rvt" onChange={onPickFile} />
-                  <button onClick={captureScreenshot} title="Capture 3D view"
-                    className="bg-gray-100 hover:bg-gray-200 text-gray-700 w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0">📷</button>
+                  <div className="relative flex-shrink-0">
+                    <button onClick={() => setCaptureMenuOpen(o => !o)} title="Capture 3D view"
+                      className="bg-gray-100 hover:bg-gray-200 text-gray-700 w-9 h-9 rounded-lg flex items-center justify-center">📷</button>
+                    {captureMenuOpen && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setCaptureMenuOpen(false)} />
+                        <div className="absolute bottom-11 left-0 z-50 bg-white rounded-lg shadow-xl border border-gray-200 py-1 w-44 text-sm">
+                          <button onClick={captureActiveView}
+                            className="w-full text-left px-3 py-2 hover:bg-gray-100">🖼️ Active View</button>
+                          <button onClick={startRegionCapture}
+                            className="w-full text-left px-3 py-2 hover:bg-gray-100">✂️ Select Region</button>
+                        </div>
+                      </>
+                    )}
+                  </div>
                   <button onClick={() => fileInputRef.current?.click()} title="Attach file"
                     className="bg-gray-100 hover:bg-gray-200 text-gray-700 w-9 h-9 rounded-lg flex items-center justify-center text-lg flex-shrink-0">+</button>
                   <input value={newConvMessage} onChange={e => setNewConvMessage(e.target.value)}
