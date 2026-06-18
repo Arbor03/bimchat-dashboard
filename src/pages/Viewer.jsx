@@ -60,6 +60,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
   // display sizing (CSS px). dispW = canvas pixel width * scale
   const [dispW, setDispW] = useState(0)
+  const [dispH, setDispH] = useState(0)
   const scaleRef = useRef(1) // canvas pixels -> CSS px
 
   // floating window position
@@ -87,6 +88,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       const scale = Math.min(avail / img.naturalWidth, availH / img.naturalHeight, 1)
       scaleRef.current = scale
       setDispW(Math.round(img.naturalWidth * scale))
+      setDispH(Math.round(img.naturalHeight * scale))
       setImgLoaded(true)
     }
     img.src = imageUrl
@@ -347,11 +349,11 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
       {/* canvas */}
       <div className="p-3 bg-gray-100 flex items-center justify-center">
-        <div className="relative" style={{ width: dispW || 'auto' }}>
+        <div className="relative" style={{ width: dispW || 'auto', height: dispH || 'auto' }}>
           {imgLoaded ? (
             <canvas ref={canvasRef}
               onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
-              style={{ width: dispW ? `${dispW}px` : 'auto', cursor: tool === 'select' ? 'default' : 'crosshair', background: '#fff', display: 'block' }} />
+              style={{ width: dispW ? `${dispW}px` : 'auto', height: dispH ? `${dispH}px` : 'auto', cursor: tool === 'select' ? 'default' : 'crosshair', background: '#fff', display: 'block' }} />
           ) : <p className="text-gray-500 p-8">Loading…</p>}
 
           {/* inline text/callout editor */}
@@ -1209,12 +1211,19 @@ export default function Viewer({
 
   // capture the current 3D view as a PNG and stage it for sending
   // Grab the rendered 3D canvas as a PNG File. `crop` (CSS px rel. to canvas
+  // The WebGL canvas the renderer actually draws into (the model lives here).
+  // querySelector('canvas') can return a different/secondary canvas, so always
+  // use the renderer's own domElement.
+  const getGLCanvas = () =>
+    worldRef.current?.renderer?.three?.domElement ||
+    containerRef.current?.querySelector('canvas') || null
+
   // top-left) limits it to a region; null = full view.
   const grabCanvasFile = async (crop) => {
     const world = worldRef.current
     const container = containerRef.current
     if (!world || !container) return null
-    const canvas = container.querySelector('canvas')
+    const canvas = getGLCanvas()
     if (!canvas) { alert('3D canvas not ready.'); return null }
     // With preserveDrawingBuffer the canvas already holds the on-screen frame.
     // Do NOT force our own render() here — it would overwrite it with a wrong
@@ -1279,7 +1288,7 @@ export default function Viewer({
   }
 
   const onRegionMouseDown = (e) => {
-    const canvas = containerRef.current?.querySelector('canvas')
+    const canvas = getGLCanvas()
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
     regionStartRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top }
@@ -1289,7 +1298,7 @@ export default function Viewer({
   }
   const onRegionMouseMove = (e) => {
     if (!regionStartRef.current) return
-    const canvas = containerRef.current?.querySelector('canvas')
+    const canvas = getGLCanvas()
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top
