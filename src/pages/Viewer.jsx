@@ -1378,12 +1378,18 @@ export default function Viewer({
   const grabCanvasFile = async (crop) => {
     const world = worldRef.current
     const container = containerRef.current
+    const fragments = fragsRef.current
     if (!world || !container) return null
     const canvas = getGLCanvas()
     if (!canvas) { alert('3D canvas not ready.'); return null }
-    // With preserveDrawingBuffer the canvas already holds the on-screen frame.
-    // Do NOT force our own render() here — it would overwrite it with a wrong
-    // camera/pipeline and produce a mismatched image.
+
+    // The model meshes are managed by FragmentsManager and only refreshed on
+    // update(). The WebGL buffer can hold a STALE frame (OBC renders on demand),
+    // so: update fragments for the current camera, let them settle one frame,
+    // then render the current scene with the active camera right before reading.
+    try { await fragments?.core.update(true) } catch {}
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
 
     let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
