@@ -67,6 +67,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const fitRef = useRef(1)
   const [zoom, setZoom] = useState(1) // canvas px -> CSS px
   const zoomRef = useRef(1); useEffect(() => { zoomRef.current = zoom }, [zoom])
+  const userZoomedRef = useRef(false)  // true once the user zooms manually
 
   // floating window position + size
   const [pos, setPos] = useState({ x: 70, y: 70 })
@@ -92,8 +93,8 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       natRef.current = { w: img.naturalWidth, h: img.naturalHeight }
       const c = canvasRef.current
       if (c) { c.width = img.naturalWidth; c.height = img.naturalHeight }
+      userZoomedRef.current = false
       setImgLoaded(true)
-      // fit a few times across frames so the scroll area has its real size
       requestAnimationFrame(() => { fitToWindow(); requestAnimationFrame(fitToWindow) })
     }
     img.src = imageUrl
@@ -113,8 +114,18 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     setZoom(f)
   }
 
+  // Re-fit whenever the scroll area gets/changes its real size (fixes the
+  // "image shows only a corner" race where fit ran before layout settled).
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => { if (!userZoomedRef.current) fitToWindow() })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [imgLoaded])
+
   // keep fit correct as the window is resized / toggled fullscreen
-  useEffect(() => { if (imgLoaded) requestAnimationFrame(fitToWindow) }, [size.w, size.h, full])
+  useEffect(() => { if (imgLoaded && !userZoomedRef.current) requestAnimationFrame(fitToWindow) }, [size.w, size.h, full])
 
   // ---------- drawing primitives ----------
   const drawArrow = (ctx, x1, y1, x2, y2, lw) => {
@@ -495,9 +506,9 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
         <span className="w-px h-5 bg-gray-300 mx-1" />
         <span className="text-[11px] text-gray-500">Zoom</span>
         <input type="range" min="20" max="400" value={pct}
-          onChange={e => setZoom((parseInt(e.target.value) / 100) * (fitRef.current || 1))} className="w-20 accent-blue-600" />
+          onChange={e => { userZoomedRef.current = true; setZoom((parseInt(e.target.value) / 100) * (fitRef.current || 1)) }} className="w-20 accent-blue-600" />
         <span className="text-[11px] text-gray-400 w-9">{pct}%</span>
-        <button onClick={fitToWindow} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">⤢ Fit</button>
+        <button onClick={() => { userZoomedRef.current = false; fitToWindow() }} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">⤢ Fit</button>
         <span className="w-px h-5 bg-gray-300 mx-1" />
         <button onClick={undo} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">↶ Undo</button>
         <button onClick={deleteSelected} disabled={selId == null}
@@ -507,7 +518,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
       {/* canvas scroll area */}
       <div ref={scrollRef} className="flex-1 overflow-auto bg-gray-100 relative"
-        onWheel={e => { if (e.ctrlKey) { e.preventDefault(); setZoom(z => Math.max((fitRef.current || 1) * 0.2, Math.min((fitRef.current || 1) * 4, z - e.deltaY * 0.0015 * z))) } }}>
+        onWheel={e => { if (e.ctrlKey) { e.preventDefault(); userZoomedRef.current = true; setZoom(z => Math.max((fitRef.current || 1) * 0.2, Math.min((fitRef.current || 1) * 4, z - e.deltaY * 0.0015 * z))) } }}>
         <div className="relative" style={{ width: imgLoaded ? natRef.current.w * zoom : 'auto', height: imgLoaded ? natRef.current.h * zoom : 'auto', margin: 'auto' }}>
           {imgLoaded ? (
             <canvas ref={canvasRef}
