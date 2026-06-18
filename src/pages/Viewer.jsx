@@ -91,14 +91,22 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     img.onload = () => {
       imgRef.current = img
       natRef.current = { w: img.naturalWidth, h: img.naturalHeight }
-      const c = canvasRef.current
-      if (c) { c.width = img.naturalWidth; c.height = img.naturalHeight }
       userZoomedRef.current = false
       setImgLoaded(true)
-      requestAnimationFrame(() => { fitToWindow(); requestAnimationFrame(fitToWindow) })
     }
     img.src = imageUrl
   }, [imageUrl])
+
+  // The <canvas> only mounts after imgLoaded, so size it HERE (canvas now
+  // exists) — not inside img.onload, where canvasRef was still null and the
+  // canvas stayed at its default 300x150 (which clipped the screenshot).
+  useEffect(() => {
+    if (!imgLoaded) return
+    const c = canvasRef.current
+    if (c) { c.width = natRef.current.w; c.height = natRef.current.h }
+    redraw()
+    requestAnimationFrame(() => { fitToWindow(); requestAnimationFrame(fitToWindow) })
+  }, [imgLoaded])
 
   const areaSize = () => {
     const el = scrollRef.current
@@ -1405,14 +1413,6 @@ export default function Viewer({
     if (!world || !container) return null
     const canvas = getGLCanvas()
     if (!canvas) { alert('3D canvas not ready.'); return null }
-
-    // TEMP DIAGNOSTIC
-    try {
-      const rc = world.renderer?.three?.domElement
-      alert('CHOSEN canvas buffer: ' + canvas.width + 'x' + canvas.height +
-        '\nrenderer.domElement buffer: ' + (rc ? rc.width + 'x' + rc.height : 'none') +
-        '\ntotal canvases on page: ' + document.querySelectorAll('canvas').length)
-    } catch (e) { alert('diag: ' + e.message) }
 
     // Read the exact frame that's on screen RIGHT NOW — synchronously, before
     // any await/render. preserveDrawingBuffer keeps the displayed frame, so this
