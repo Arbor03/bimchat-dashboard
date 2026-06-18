@@ -1383,19 +1383,17 @@ export default function Viewer({
   }
 
   // capture the current 3D view as a PNG and stage it for sending
-  // Pick the canvas that actually holds the rendered model. There can be more
-  // than one <canvas> (OBC helpers/2D overlays), so choose the LARGEST by area,
-  // preferring the renderer's own domElement when it's the big one.
+  // The model's WebGL canvas has a large backing buffer. A stray/secondary
+  // canvas (default 300x150) was being read instead, so the capture only got
+  // the top-left 300x150 region. Scan the WHOLE document and pick the canvas
+  // with the largest backing buffer — that's the real 3D viewport.
   const getGLCanvas = () => {
-    const container = containerRef.current
     const rendererCanvas = worldRef.current?.renderer?.three?.domElement || null
     let best = rendererCanvas
     let bestArea = best ? best.width * best.height : 0
-    if (container) {
-      for (const c of container.querySelectorAll('canvas')) {
-        const area = c.width * c.height
-        if (area > bestArea) { best = c; bestArea = area }
-      }
+    for (const c of document.querySelectorAll('canvas')) {
+      const area = c.width * c.height
+      if (area > bestArea) { best = c; bestArea = area }
     }
     return best
   }
