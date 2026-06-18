@@ -1383,13 +1383,17 @@ export default function Viewer({
     const canvas = getGLCanvas()
     if (!canvas) { alert('3D canvas not ready.'); return null }
 
-    // The model meshes are managed by FragmentsManager and only refreshed on
-    // update(). The WebGL buffer can hold a STALE frame (OBC renders on demand),
-    // so: update fragments for the current camera, let them settle one frame,
-    // then render the current scene with the active camera right before reading.
-    try { await fragments?.core.update(true) } catch {}
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
-    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
+    // That Open streams the model meshes lazily, so the very first capture can
+    // read a frame before the geometry has arrived. Run a few update+frame
+    // cycles so OBC repaints the current view with the full model, then read the
+    // on-screen buffer (preserveDrawingBuffer keeps it). No manual render here —
+    // a raw render can paint a half-streamed frame.
+    const raf = () => new Promise(r => requestAnimationFrame(r))
+    for (let i = 0; i < 3; i++) {
+      try { await fragments?.core.update(true) } catch {}
+      await raf()
+    }
+    await raf()
 
     let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
