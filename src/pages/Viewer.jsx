@@ -1389,14 +1389,15 @@ export default function Viewer({
     const canvas = getGLCanvas()
     if (!canvas) { alert('3D canvas not ready.'); return null }
 
-    // Refresh the model meshes for the current camera, wait for the paint, then
-    // read the LIVE on-screen canvas directly. preserveDrawingBuffer keeps the
-    // exact frame that is displayed — so the capture always matches the screen.
+    // Synchronously render the current scene with the active camera straight to
+    // the renderer's own canvas, then read it immediately. This is exactly what
+    // worked for the chat screenshot — no async cycles that could read an old
+    // frame. (We apply the camera + kick a fragment update first so the model
+    // meshes are current.)
     try { for (const [, m] of fragments.list) m.useCamera(world.camera.three) } catch {}
-    try { await fragments?.core.update(true) } catch {}
-    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+    try { fragments?.core.update(true) } catch {}
+    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
 
-    // crop region: crop is CSS px relative to the canvas; scale to backing pixels
     let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
       const rect = canvas.getBoundingClientRect()
