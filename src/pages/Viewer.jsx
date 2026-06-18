@@ -1406,6 +1406,14 @@ export default function Viewer({
     const canvas = getGLCanvas()
     if (!canvas) { alert('3D canvas not ready.'); return null }
 
+    // TEMP DIAGNOSTIC
+    try {
+      const rc = world.renderer?.three?.domElement
+      alert('CHOSEN canvas buffer: ' + canvas.width + 'x' + canvas.height +
+        '\nrenderer.domElement buffer: ' + (rc ? rc.width + 'x' + rc.height : 'none') +
+        '\ntotal canvases on page: ' + document.querySelectorAll('canvas').length)
+    } catch (e) { alert('diag: ' + e.message) }
+
     // Read the exact frame that's on screen RIGHT NOW — synchronously, before
     // any await/render. preserveDrawingBuffer keeps the displayed frame, so this
     // matches the screen (the same way the chat screenshot worked).
