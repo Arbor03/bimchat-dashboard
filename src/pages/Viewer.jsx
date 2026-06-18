@@ -30,6 +30,232 @@ function emailFromToken(token) {
   } catch { return null }
 }
 
+// ===================================================================
+// Annotate Screenshot modal — mirrors the Revit add-in's tool set.
+// Vector annotations kept in an array so Undo/Clear are trivial; on Send
+// the base image + annotations are flattened into one PNG File.
+// NOTE: quality/UX to be reworked in a second round (parity-first for now).
+// ===================================================================
+const ANNOT_COLORS = ['#e74c3c', '#f1c40f', '#2ecc71', '#3498db', '#000000']
+const ANNOT_TOOLS = [
+  { id: 'pen', label: '✏️ Pen' },
+  { id: 'text', label: '🅰 Text' },
+  { id: 'cloud', label: '☁ Cloud' },
+  { id: 'callout', label: '💬 Callout' },
+  { id: 'arrow', label: '➦ Arrow' },
+  { id: 'rect', label: '▭ Rect' },
+]
+
+function AnnotateModal({ imageUrl, onCancel, onSend }) {
+  const canvasRef = useRef(null)
+  const imgRef = useRef(null)
+  const [imgLoaded, setImgLoaded] = useState(false)
+  const [tool, setTool] = useState('pen')
+  const [color, setColor] = useState('#e74c3c')
+  const [width, setWidth] = useState(3)
+  const [zoom, setZoom] = useState(1)              // 1 = fit-to-window (= "100%")
+  const fitWidthRef = useRef(0)                    // CSS px width at zoom 1
+  const [shapes, setShapes] = useState([])
+  const shapesRef = useRef([])
+  useEffect(() => { shapesRef.current = shapes }, [shapes])
+
+  const drawingRef = useRef(null)   // shape currently being drawn
+  const toolRef = useRef(tool); useEffect(() => { toolRef.current = tool }, [tool])
+  const colorRef = useRef(color); useEffect(() => { colorRef.current = color }, [color])
+  const widthRef = useRef(width); useEffect(() => { widthRef.current = width }, [width])
+
+  // load the base image, size the canvas to its natural pixels
+  useEffect(() => {
+    const img = new Image()
+    img.onload = () => {
+      imgRef.current = img
+      const c = canvasRef.current
+      if (c) { c.width = img.naturalWidth; c.height = img.naturalHeight }
+      // fit width to the available area (~ modal width minus padding)
+      const avail = Math.min(window.innerWidth - 120, 1100)
+      const availH = window.innerHeight - 240
+      let w = img.naturalWidth, h = img.naturalHeight
+      const scale = Math.min(avail / w, availH / h, 1)
+      fitWidthRef.current = Math.round(w * scale)
+      setImgLoaded(true)
+    }
+    img.src = imageUrl
+  }, [imageUrl])
+
+  const drawCloud = (ctx, x, y, w, h) => {
+    const r = Math.max(6, Math.min(Math.abs(w), Math.abs(h)) / 8)
+    const x0 = Math.min(x, x + w), y0 = Math.min(y, y + h)
+    const ww = Math.abs(w), hh = Math.abs(h)
+    ctx.beginPath()
+    const arc = (cx, cy) => ctx.arc(cx, cy, r, 0, Math.PI * 2)
+    for (let px = x0; px < x0 + ww; px += r * 1.6) { arc(px, y0); arc(px, y0 + hh) }
+    for (let py = y0; py < y0 + hh; py += r * 1.6) { arc(x0, py); arc(x0 + ww, py) }
+    ctx.stroke()
+  }
+
+  const drawArrow = (ctx, x1, y1, x2, y2, lw) => {
+    const head = Math.max(10, lw * 3)
+    const ang = Math.atan2(y2 - y1, x2 - x1)
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke()
+    ctx.beginPath()
+    ctx.moveTo(x2, y2)
+    ctx.lineTo(x2 - head * Math.cos(ang - Math.PI / 6), y2 - head * Math.sin(ang - Math.PI / 6))
+    ctx.lineTo(x2 - head * Math.cos(ang + Math.PI / 6), y2 - head * Math.sin(ang + Math.PI / 6))
+    ctx.closePath(); ctx.fillStyle = ctx.strokeStyle; ctx.fill()
+  }
+
+  const drawShape = (ctx, s) => {
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color
+    ctx.lineWidth = s.width; ctx.lineJoin = 'round'; ctx.lineCap = 'round'
+    if (s.tool === 'pen') {
+      ctx.beginPath()
+      s.points.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y))
+      ctx.stroke()
+    } else if (s.tool === 'rect') {
+      ctx.strokeRect(s.x, s.y, s.w, s.h)
+    } else if (s.tool === 'arrow') {
+      drawArrow(ctx, s.x1, s.y1, s.x2, s.y2, s.width)
+    } else if (s.tool === 'cloud') {
+      drawCloud(ctx, s.x, s.y, s.w, s.h)
+    } else if (s.tool === 'text') {
+      const fs = Math.max(14, s.width * 6)
+      ctx.font = `bold ${fs}px sans-serif`
+      ctx.textBaseline = 'top'
+      ctx.fillText(s.text, s.x, s.y)
+    } else if (s.tool === 'callout') {
+      const fs = Math.max(14, s.width * 6)
+      ctx.font = `bold ${fs}px sans-serif`
+      const pad = 8
+      const tw = ctx.measureText(s.text).width
+      const bw = Math.max(40, tw + pad * 2), bh = fs + pad * 2
+      ctx.fillStyle = 'rgba(255,255,255,0.9)'
+      ctx.strokeRect(s.x, s.y, bw, bh)
+      ctx.fillRect(s.x, s.y, bw, bh)
+      ctx.strokeStyle = s.color; ctx.strokeRect(s.x, s.y, bw, bh)
+      ctx.beginPath(); ctx.moveTo(s.x, s.y + bh); ctx.lineTo(s.x - 14, s.y + bh + 18); ctx.lineTo(s.x + 16, s.y + bh); ctx.stroke()
+      ctx.fillStyle = s.color; ctx.textBaseline = 'top'
+      ctx.fillText(s.text, s.x + pad, s.y + pad)
+    }
+  }
+
+  const redraw = (preview) => {
+    const c = canvasRef.current, img = imgRef.current
+    if (!c || !img) return
+    const ctx = c.getContext('2d')
+    ctx.clearRect(0, 0, c.width, c.height)
+    ctx.drawImage(img, 0, 0)
+    for (const s of shapesRef.current) drawShape(ctx, s)
+    if (preview) drawShape(ctx, preview)
+  }
+  useEffect(() => { if (imgLoaded) redraw() }, [imgLoaded, shapes])
+
+  const toCanvasXY = (e) => {
+    const c = canvasRef.current
+    const rect = c.getBoundingClientRect()
+    return {
+      x: (e.clientX - rect.left) * (c.width / rect.width),
+      y: (e.clientY - rect.top) * (c.height / rect.height),
+    }
+  }
+
+  const onDown = (e) => {
+    const p = toCanvasXY(e)
+    const t = toolRef.current
+    if (t === 'text' || t === 'callout') {
+      const text = window.prompt(t === 'text' ? 'Text:' : 'Callout text:')
+      if (text && text.trim()) {
+        setShapes(prev => [...prev, { tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, text: text.trim() }])
+      }
+      return
+    }
+    if (t === 'pen') {
+      drawingRef.current = { tool: 'pen', color: colorRef.current, width: widthRef.current, points: [p] }
+    } else {
+      drawingRef.current = { tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, w: 0, h: 0, x1: p.x, y1: p.y, x2: p.x, y2: p.y, _sx: p.x, _sy: p.y }
+    }
+  }
+  const onMove = (e) => {
+    const d = drawingRef.current
+    if (!d) return
+    const p = toCanvasXY(e)
+    if (d.tool === 'pen') { d.points.push(p) }
+    else if (d.tool === 'arrow') { d.x2 = p.x; d.y2 = p.y }
+    else { d.x = Math.min(d._sx, p.x); d.y = Math.min(d._sy, p.y); d.w = p.x - d._sx; d.h = p.y - d._sy }
+    redraw(d)
+  }
+  const onUp = () => {
+    const d = drawingRef.current
+    drawingRef.current = null
+    if (!d) return
+    const tiny = d.tool !== 'pen' && d.tool !== 'arrow' && Math.abs(d.w) < 3 && Math.abs(d.h) < 3
+    const tinyArrow = d.tool === 'arrow' && Math.hypot(d.x2 - d.x1, d.y2 - d.y1) < 3
+    if (tiny || tinyArrow) { redraw(); return }
+    setShapes(prev => [...prev, d])
+  }
+
+  const undo = () => setShapes(prev => prev.slice(0, -1))
+  const clearAll = () => setShapes([])
+
+  const handleSend = () => {
+    const c = canvasRef.current
+    if (!c) return
+    c.toBlob((blob) => {
+      if (!blob) { onCancel(); return }
+      const file = new File([blob], `annotated_${Date.now()}.png`, { type: 'image/png' })
+      onSend(file)
+    }, 'image/png')
+  }
+
+  const dispWidth = Math.round(fitWidthRef.current * zoom)
+
+  return (
+    <div className="fixed inset-0 bg-black/70 z-[60] flex flex-col">
+      {/* toolbar */}
+      <div className="bg-gray-800 text-white px-4 py-2 flex items-center gap-3 flex-wrap">
+        <span className="font-semibold mr-2">Annotate Screenshot</span>
+        {ANNOT_TOOLS.map(t => (
+          <button key={t.id} onClick={() => setTool(t.id)}
+            className={`px-2.5 py-1 rounded text-sm ${tool === t.id ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'}`}>
+            {t.label}
+          </button>
+        ))}
+        <span className="w-px h-6 bg-gray-600 mx-1" />
+        {ANNOT_COLORS.map(c => (
+          <button key={c} onClick={() => setColor(c)}
+            className={`w-6 h-6 rounded ${color === c ? 'ring-2 ring-white' : ''}`}
+            style={{ backgroundColor: c }} />
+        ))}
+        <span className="w-px h-6 bg-gray-600 mx-1" />
+        <span className="text-xs">Line</span>
+        <input type="range" min="1" max="12" value={width}
+          onChange={e => setWidth(parseInt(e.target.value))} className="w-24 accent-blue-500" />
+        <span className="w-px h-6 bg-gray-600 mx-1" />
+        <button onClick={undo} className="px-2.5 py-1 rounded text-sm bg-gray-700 hover:bg-gray-600">↶ Undo</button>
+        <button onClick={clearAll} className="px-2.5 py-1 rounded text-sm bg-gray-700 hover:bg-gray-600">🗑 Clear</button>
+        <button onClick={() => setZoom(1)} className="px-2.5 py-1 rounded text-sm bg-gray-700 hover:bg-gray-600">⤢ Fit</button>
+        <span className="text-xs text-gray-300">{Math.round(zoom * 100)}%</span>
+      </div>
+
+      {/* canvas area */}
+      <div className="flex-1 overflow-auto flex items-center justify-center p-4"
+        onWheel={e => { if (e.ctrlKey) { e.preventDefault(); setZoom(z => Math.max(0.2, Math.min(4, z - e.deltaY * 0.001))) } }}>
+        {imgLoaded ? (
+          <canvas ref={canvasRef}
+            onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
+            style={{ width: dispWidth ? `${dispWidth}px` : 'auto', cursor: 'crosshair', background: '#fff' }}
+            className="shadow-lg" />
+        ) : <p className="text-white">Loading…</p>}
+      </div>
+
+      {/* footer */}
+      <div className="bg-gray-800 px-4 py-3 flex justify-end gap-2">
+        <button onClick={onCancel} className="px-4 py-2 rounded bg-gray-600 hover:bg-gray-500 text-white text-sm">Cancel</button>
+        <button onClick={handleSend} className="px-5 py-2 rounded bg-green-600 hover:bg-green-700 text-white text-sm font-medium">Send →</button>
+      </div>
+    </div>
+  )
+}
+
 export default function Viewer({
   files = [], projectName, projectId,
   folders = [], projectFiles = [], projectMembers = [],
@@ -114,6 +340,7 @@ export default function Viewer({
   const [regionMode, setRegionMode] = useState(false)
   const [regionRect, setRegionRect] = useState(null)
   const regionStartRef = useRef(null)
+  const [annotUrl, setAnnotUrl] = useState(null)   // object URL of a freshly captured shot
   const [showNewConvModal, setShowNewConvModal] = useState(false)
   const [ncType, setNcType] = useState('dm')
   const [ncName, setNcName] = useState('')
@@ -888,9 +1115,20 @@ export default function Viewer({
     setPendingPreview(URL.createObjectURL(file))
   }
 
+  // open the annotate modal with a freshly captured shot
+  const openAnnot = (file) => {
+    if (!file) return
+    if (annotUrl) { try { URL.revokeObjectURL(annotUrl) } catch {} }
+    setAnnotUrl(URL.createObjectURL(file))
+  }
+  const closeAnnot = () => {
+    if (annotUrl) { try { URL.revokeObjectURL(annotUrl) } catch {} }
+    setAnnotUrl(null)
+  }
+
   const captureActiveView = async () => {
     setCaptureMenuOpen(false)
-    stagePending(await grabCanvasFile(null))
+    openAnnot(await grabCanvasFile(null))
   }
 
   const startRegionCapture = () => {
@@ -920,7 +1158,7 @@ export default function Viewer({
     const r = regionRect
     setRegionMode(false)
     regionStartRef.current = null
-    if (r && r.w > 4 && r.h > 4) stagePending(await grabCanvasFile(r))
+    if (r && r.w > 4 && r.h > 4) openAnnot(await grabCanvasFile(r))
     setRegionRect(null)
   }
 
@@ -1683,6 +1921,15 @@ export default function Viewer({
           )}
         </div>
       </div>
+
+      {/* ANNOTATE SCREENSHOT MODAL */}
+      {annotUrl && (
+        <AnnotateModal
+          imageUrl={annotUrl}
+          onCancel={closeAnnot}
+          onSend={(file) => { stagePending(file); closeAnnot() }}
+        />
+      )}
 
       {/* NEW CONVERSATION MODAL */}
       {showNewConvModal && (
