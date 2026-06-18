@@ -321,7 +321,7 @@ export default function Viewer({
         const worlds = components.get(OBC.Worlds)
         const world = worlds.create()
         world.scene = new OBC.SimpleScene(components)
-        world.renderer = new OBC.SimpleRenderer(components, containerRef.current)
+        world.renderer = new OBC.SimpleRenderer(components, containerRef.current, { preserveDrawingBuffer: true })
         world.camera = new OBC.OrthoPerspectiveCamera(components)
 
         // Mouse like Revit: middle = pan, wheel = zoom
