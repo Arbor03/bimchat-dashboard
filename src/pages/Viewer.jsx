@@ -563,6 +563,7 @@ export default function Viewer({
   const worldRef = useRef(null)
   const casterRef = useRef(null)
   const clipperRef = useRef(null)
+  const screenshotRendererRef = useRef(null)   // reusable offscreen renderer for captures
   const chatEndRef = useRef(null)
 
   const modelIdToFileIdRef = useRef({})   // 'file-12' -> 12
@@ -1051,6 +1052,7 @@ export default function Viewer({
         }
         c?.dispose?.()
       } catch {}
+      try { screenshotRendererRef.current?.dispose?.(); screenshotRendererRef.current = null } catch {}
       componentsRef.current = null
       loadedModelIdsRef.current = new Set()
       modelIdToFileIdRef.current = {}
@@ -1380,39 +1382,57 @@ export default function Viewer({
     const container = containerRef.current
     const fragments = fragsRef.current
     if (!world || !container) return null
-    const canvas = getGLCanvas()
-    if (!canvas) { alert('3D canvas not ready.'); return null }
+    const glCanvas = getGLCanvas()
+    if (!glCanvas) { alert('3D canvas not ready.'); return null }
 
-    // That Open streams the model meshes lazily, so the very first capture can
-    // read a frame before the geometry has arrived. Run a few update+frame
-    // cycles so OBC repaints the current view with the full model, then read the
-    // on-screen buffer (preserveDrawingBuffer keeps it). No manual render here —
-    // a raw render can paint a half-streamed frame.
-    const raf = () => new Promise(r => requestAnimationFrame(r))
-    for (let i = 0; i < 3; i++) {
-      try { await fragments?.core.update(true) } catch {}
-      await raf()
+    // Make the fragment meshes current for this camera, then render the scene
+    // FRESH into a temp renderer sized exactly to the on-screen viewport. This
+    // avoids reading a stale / wrong-sized WebGL backbuffer (which produced a
+    // fixed-size cropped corner) and always matches what is on screen.
+    try { for (const [, m] of fragments.list) m.useCamera(world.camera.three) } catch {}
+    try { await fragments?.core.update(true) } catch {}
+    await new Promise(r => requestAnimationFrame(r))
+
+    const rect = glCanvas.getBoundingClientRect()
+    const cssW = Math.max(1, Math.round(rect.width))
+    const cssH = Math.max(1, Math.round(rect.height))
+    const dpr = Math.min(window.devicePixelRatio || 1, 2)
+
+    let baseCanvas = glCanvas
+    let tmp = null
+    try {
+      tmp = screenshotRendererRef.current
+      if (!tmp) {
+        tmp = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true })
+        screenshotRendererRef.current = tmp
+      }
+      tmp.setPixelRatio(dpr)
+      tmp.setSize(cssW, cssH, false)
+      tmp.setClearColor(0x000000, 0)
+      try {
+        tmp.localClippingEnabled = !!world.renderer.three.localClippingEnabled
+        tmp.clippingPlanes = world.renderer.three.clippingPlanes || []
+      } catch {}
+      tmp.render(world.scene.three, world.camera.three)
+      baseCanvas = tmp.domElement
+    } catch (e) {
+      baseCanvas = glCanvas   // fallback: live buffer
     }
-    await raf()
 
-    let outCanvas = canvas
+    // crop region: crop is CSS px relative to the viewport; baseCanvas is cssW*dpr × cssH*dpr
+    let outCanvas = baseCanvas
     if (crop && crop.w > 4 && crop.h > 4) {
-      const rect = canvas.getBoundingClientRect()
-      const sx = canvas.width / rect.width
-      const sy = canvas.height / rect.height
-      // source rect in canvas pixels, clamped inside the canvas
-      let srcX = Math.round(crop.x * sx)
-      let srcY = Math.round(crop.y * sy)
-      let srcW = Math.round(crop.w * sx)
-      let srcH = Math.round(crop.h * sy)
-      srcX = Math.max(0, Math.min(srcX, canvas.width - 1))
-      srcY = Math.max(0, Math.min(srcY, canvas.height - 1))
-      srcW = Math.max(1, Math.min(srcW, canvas.width - srcX))
-      srcH = Math.max(1, Math.min(srcH, canvas.height - srcY))
+      const sx = baseCanvas.width / cssW
+      const sy = baseCanvas.height / cssH
+      let srcX = Math.round(crop.x * sx), srcY = Math.round(crop.y * sy)
+      let srcW = Math.round(crop.w * sx), srcH = Math.round(crop.h * sy)
+      srcX = Math.max(0, Math.min(srcX, baseCanvas.width - 1))
+      srcY = Math.max(0, Math.min(srcY, baseCanvas.height - 1))
+      srcW = Math.max(1, Math.min(srcW, baseCanvas.width - srcX))
+      srcH = Math.max(1, Math.min(srcH, baseCanvas.height - srcY))
       const c = document.createElement('canvas')
       c.width = srcW; c.height = srcH
-      const ctx = c.getContext('2d')
-      ctx.drawImage(canvas, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH)
+      c.getContext('2d').drawImage(baseCanvas, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH)
       outCanvas = c
     }
 
