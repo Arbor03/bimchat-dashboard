@@ -1389,12 +1389,13 @@ export default function Viewer({
     const canvas = getGLCanvas()
     if (!canvas) { alert('3D canvas not ready.'); return null }
 
-    // Synchronously render the current scene with the active camera straight to
-    // the renderer's own canvas, then read it immediately. This is exactly what
-    // worked for the chat screenshot — no async cycles that could read an old
-    // frame. (We apply the camera + kick a fragment update first so the model
-    // meshes are current.)
+    // First capture was stale ("works on the 2nd click") because the first
+    // render only primes the GPU/geometry. So render once, wait a frame, render
+    // again, then read — the 1st click already yields the correct frame.
     try { for (const [, m] of fragments.list) m.useCamera(world.camera.three) } catch {}
+    try { fragments?.core.update(true) } catch {}
+    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
+    await new Promise(r => requestAnimationFrame(r))
     try { fragments?.core.update(true) } catch {}
     try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
 
