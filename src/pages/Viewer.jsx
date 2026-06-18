@@ -1407,6 +1407,20 @@ export default function Viewer({
     try { await fragments?.core.update(true) } catch {}
     await new Promise(r => requestAnimationFrame(r))
 
+    // --- TEMP DIAGNOSTIC: list every canvas so we can pick the right one ---
+    try {
+      const cs = Array.from(container.querySelectorAll('canvas'))
+      const dom = world.renderer?.three?.domElement
+      const lines = cs.map((c, i) => {
+        const r = c.getBoundingClientRect()
+        const isDom = c === dom ? ' [renderer.domElement]' : ''
+        const isChosen = c === canvas ? ' <== CHOSEN' : ''
+        return `#${i}: buffer ${c.width}x${c.height} | screen ${Math.round(r.width)}x${Math.round(r.height)}${isDom}${isChosen}`
+      })
+      alert('Canvases (' + cs.length + '):\n' + lines.join('\n'))
+    } catch (e) { alert('diag err: ' + e.message) }
+    // --- END DIAGNOSTIC ---
+
     let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
       const rect = canvas.getBoundingClientRect()
