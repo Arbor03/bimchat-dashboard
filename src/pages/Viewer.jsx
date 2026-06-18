@@ -93,14 +93,15 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       const c = canvasRef.current
       if (c) { c.width = img.naturalWidth; c.height = img.naturalHeight }
       setImgLoaded(true)
-      setTimeout(fitToWindow, 0)
+      // fit a few times across frames so the scroll area has its real size
+      requestAnimationFrame(() => { fitToWindow(); requestAnimationFrame(fitToWindow) })
     }
     img.src = imageUrl
   }, [imageUrl])
 
   const areaSize = () => {
     const el = scrollRef.current
-    if (el) return { w: el.clientWidth - 8, h: el.clientHeight - 8 }
+    if (el && el.clientWidth > 20 && el.clientHeight > 20) return { w: el.clientWidth - 8, h: el.clientHeight - 8 }
     return { w: size.w - 24, h: size.h - 150 }
   }
   const fitToWindow = () => {
@@ -111,6 +112,9 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     fitRef.current = f
     setZoom(f)
   }
+
+  // keep fit correct as the window is resized / toggled fullscreen
+  useEffect(() => { if (imgLoaded) requestAnimationFrame(fitToWindow) }, [size.w, size.h, full])
 
   // ---------- drawing primitives ----------
   const drawArrow = (ctx, x1, y1, x2, y2, lw) => {
@@ -1382,57 +1386,31 @@ export default function Viewer({
     const container = containerRef.current
     const fragments = fragsRef.current
     if (!world || !container) return null
-    const glCanvas = getGLCanvas()
-    if (!glCanvas) { alert('3D canvas not ready.'); return null }
+    const canvas = getGLCanvas()
+    if (!canvas) { alert('3D canvas not ready.'); return null }
 
-    // Make the fragment meshes current for this camera, then render the scene
-    // FRESH into a temp renderer sized exactly to the on-screen viewport. This
-    // avoids reading a stale / wrong-sized WebGL backbuffer (which produced a
-    // fixed-size cropped corner) and always matches what is on screen.
+    // Refresh the model meshes for the current camera, wait for the paint, then
+    // read the LIVE on-screen canvas directly. preserveDrawingBuffer keeps the
+    // exact frame that is displayed — so the capture always matches the screen.
     try { for (const [, m] of fragments.list) m.useCamera(world.camera.three) } catch {}
     try { await fragments?.core.update(true) } catch {}
-    await new Promise(r => requestAnimationFrame(r))
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
 
-    const rect = glCanvas.getBoundingClientRect()
-    const cssW = Math.max(1, Math.round(rect.width))
-    const cssH = Math.max(1, Math.round(rect.height))
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
-
-    let baseCanvas = glCanvas
-    let tmp = null
-    try {
-      tmp = screenshotRendererRef.current
-      if (!tmp) {
-        tmp = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true })
-        screenshotRendererRef.current = tmp
-      }
-      tmp.setPixelRatio(dpr)
-      tmp.setSize(cssW, cssH, false)
-      tmp.setClearColor(0x000000, 0)
-      try {
-        tmp.localClippingEnabled = !!world.renderer.three.localClippingEnabled
-        tmp.clippingPlanes = world.renderer.three.clippingPlanes || []
-      } catch {}
-      tmp.render(world.scene.three, world.camera.three)
-      baseCanvas = tmp.domElement
-    } catch (e) {
-      baseCanvas = glCanvas   // fallback: live buffer
-    }
-
-    // crop region: crop is CSS px relative to the viewport; baseCanvas is cssW*dpr × cssH*dpr
-    let outCanvas = baseCanvas
+    // crop region: crop is CSS px relative to the canvas; scale to backing pixels
+    let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
-      const sx = baseCanvas.width / cssW
-      const sy = baseCanvas.height / cssH
+      const rect = canvas.getBoundingClientRect()
+      const sx = canvas.width / rect.width
+      const sy = canvas.height / rect.height
       let srcX = Math.round(crop.x * sx), srcY = Math.round(crop.y * sy)
       let srcW = Math.round(crop.w * sx), srcH = Math.round(crop.h * sy)
-      srcX = Math.max(0, Math.min(srcX, baseCanvas.width - 1))
-      srcY = Math.max(0, Math.min(srcY, baseCanvas.height - 1))
-      srcW = Math.max(1, Math.min(srcW, baseCanvas.width - srcX))
-      srcH = Math.max(1, Math.min(srcH, baseCanvas.height - srcY))
+      srcX = Math.max(0, Math.min(srcX, canvas.width - 1))
+      srcY = Math.max(0, Math.min(srcY, canvas.height - 1))
+      srcW = Math.max(1, Math.min(srcW, canvas.width - srcX))
+      srcH = Math.max(1, Math.min(srcH, canvas.height - srcY))
       const c = document.createElement('canvas')
       c.width = srcW; c.height = srcH
-      c.getContext('2d').drawImage(baseCanvas, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH)
+      c.getContext('2d').drawImage(canvas, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH)
       outCanvas = c
     }
 
