@@ -1216,7 +1216,9 @@ export default function Viewer({
     if (!world || !container) return null
     const canvas = container.querySelector('canvas')
     if (!canvas) { alert('3D canvas not ready.'); return null }
-    try { world.renderer.three.render(world.scene.three, world.camera.three) } catch {}
+    // With preserveDrawingBuffer the canvas already holds the on-screen frame.
+    // Do NOT force our own render() here — it would overwrite it with a wrong
+    // camera/pipeline and produce a mismatched image.
 
     let outCanvas = canvas
     if (crop && crop.w > 4 && crop.h > 4) {
