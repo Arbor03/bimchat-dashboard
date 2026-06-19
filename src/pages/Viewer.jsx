@@ -37,7 +37,7 @@ const ANNOT_TOOLS = [
   { id: 'text', label: '🅰 Text' },
   { id: 'callout', label: '💬 Callout' },
   { id: 'cloud', label: '☁ Cloud' },
-  { id: 'cloudtext', label: '☁🅰 Cloud+text' },
+  { id: 'cloudtext', label: '☁🅰 Revision' },
   { id: 'arrow', label: '➦ Arrow' },
   { id: 'rect', label: '▭ Rect' },
 ]
@@ -199,8 +199,10 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     if (s.target) {
       ctx.strokeStyle = s.color; ctx.lineWidth = s.width
       ctx.beginPath(); ctx.moveTo(s.target.x, s.target.y); ctx.lineTo(s.x, underlineY); ctx.stroke()
-      ctx.beginPath(); ctx.arc(s.target.x, s.target.y, Math.max(3, s.width), 0, Math.PI * 2)
-      ctx.fillStyle = s.color; ctx.fill()
+      if (!s._noDot) {
+        ctx.beginPath(); ctx.arc(s.target.x, s.target.y, Math.max(3, s.width), 0, Math.PI * 2)
+        ctx.fillStyle = s.color; ctx.fill()
+      }
     }
     // subtle background for legibility (no border box)
     ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillRect(s.x, s.y, bw, bh)
@@ -213,8 +215,19 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   }
   const drawCloudText = (ctx, s) => {
     drawCloud(ctx, s.x, s.y, s.w, s.h)
-    const target = { x: s.x + s.w / 2, y: s.y + s.h / 2 }   // leader points at the cloud
-    drawCallout(ctx, { ...s, x: s.tx, y: s.ty, target })     // reuse text+underline+leader
+    const cx = s.x + s.w / 2, cy = s.y + s.h / 2     // logical anchor = cloud center (stable)
+    const b = textBox(ctx, s)
+    const px = s.tx, py = s.ty + b.h + 4              // text underline-left (matches drawCallout)
+    // draw the text + underline with NO leader (we draw our own clipped leader)
+    drawCallout(ctx, { ...s, x: s.tx, y: s.ty, target: null })
+    // leader from cloud center to the text, but visible only OUTSIDE the cloud:
+    const dx = px - cx, dy = py - cy
+    const tX = Math.abs(dx) > 1e-3 ? (s.w / 2) / Math.abs(dx) : Infinity
+    const tY = Math.abs(dy) > 1e-3 ? (s.h / 2) / Math.abs(dy) : Infinity
+    const t = Math.min(tX, tY, 1)                     // where the center→text line exits the cloud
+    const edge = { x: cx + dx * t, y: cy + dy * t }
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width
+    ctx.beginPath(); ctx.moveTo(edge.x, edge.y); ctx.lineTo(px, py); ctx.stroke()
   }
   const drawShape = (ctx, s) => {
     ctx.strokeStyle = s.color; ctx.fillStyle = s.color
