@@ -34,12 +34,14 @@ const ANNOT_COLORS = ['#e74c3c', '#f1c40f', '#2ecc71', '#3498db', '#000000']
 const ANNOT_TOOLS = [
   { id: 'select', label: '⤢ Select' },
   { id: 'pen', label: '✏️ Pen' },
+  { id: 'highlight', label: '🖍 Highlight' },
   { id: 'text', label: '🅰 Text' },
   { id: 'callout', label: '💬 Callout' },
   { id: 'cloud', label: '☁ Cloud' },
   { id: 'cloudtext', label: '☁🅰 Revision' },
   { id: 'arrow', label: '➦ Arrow' },
   { id: 'rect', label: '▭ Rect' },
+  { id: 'stamp', label: '🔖 Stamp' },
 ]
 
 // Floating, draggable, resizable annotate window. Annotations stay editable
@@ -54,6 +56,10 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const [tool, setTool] = useState('pen')
   const [color, setColor] = useState('#e74c3c')
   const [width, setWidth] = useState(3)
+  const [fontSize, setFontSize] = useState(28)
+  const [stampKind, setStampKind] = useState('check')   // check | cross | rev
+  const stampKindRef = useRef('check'); useEffect(() => { stampKindRef.current = stampKind }, [stampKind])
+  const revNumRef = useRef(1)   // auto-incrementing Δ number
 
   const [shapes, setShapes] = useState([])
   const shapesRef = useRef([])
@@ -87,6 +93,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const toolRef = useRef(tool); useEffect(() => { toolRef.current = tool }, [tool])
   const colorRef = useRef(color); useEffect(() => { colorRef.current = color }, [color])
   const widthRef = useRef(width); useEffect(() => { widthRef.current = width }, [width])
+  const fontSizeRef = useRef(fontSize); useEffect(() => { fontSizeRef.current = fontSize }, [fontSize])
   const interRef = useRef(null) // active interaction {mode,...}
 
   // load base image, compute fit
@@ -177,7 +184,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     scallop(x0, y0 + hh, x0, y0, -1, 0)
     ctx.closePath(); ctx.stroke()
   }
-  const fontPx = (s) => Math.max(14, s.width * 6)
+  const fontPx = (s) => s.fontSize ? s.fontSize : Math.max(14, s.width * 6)
   const textLines = (s) => String(s.text).split('\n')
   const textBox = (ctx, s) => {
     const fs = fontPx(s); ctx.font = `bold ${fs}px sans-serif`
@@ -232,16 +239,44 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     ctx.strokeStyle = s.color; ctx.lineWidth = s.width
     ctx.beginPath(); ctx.moveTo(edge.x, edge.y); ctx.lineTo(px, py); ctx.stroke()
   }
+  const drawStamp = (ctx, s) => {
+    const sz = s.fontSize || 28
+    const x = s.x, y = s.y   // center
+    ctx.save()
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color
+    ctx.lineWidth = Math.max(2, s.width); ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+    if (s.kind === 'check') {
+      ctx.beginPath(); ctx.moveTo(x - sz * 0.4, y); ctx.lineTo(x - sz * 0.08, y + sz * 0.38); ctx.lineTo(x + sz * 0.45, y - sz * 0.42); ctx.stroke()
+    } else if (s.kind === 'cross') {
+      ctx.beginPath(); ctx.moveTo(x - sz * 0.4, y - sz * 0.4); ctx.lineTo(x + sz * 0.4, y + sz * 0.4)
+      ctx.moveTo(x + sz * 0.4, y - sz * 0.4); ctx.lineTo(x - sz * 0.4, y + sz * 0.4); ctx.stroke()
+    } else if (s.kind === 'rev') {
+      const w = sz * 1.8, h = sz * 1.4
+      drawCloud(ctx, x - w / 2, y - h / 2, w, h)
+      ctx.fillStyle = s.color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.font = `bold ${sz * 0.8}px sans-serif`
+      ctx.fillText('Δ' + s.num, x, y + sz * 0.02)
+      ctx.textAlign = 'start'
+    }
+    ctx.restore()
+  }
   const drawShape = (ctx, s) => {
     ctx.strokeStyle = s.color; ctx.fillStyle = s.color
     ctx.lineWidth = s.width; ctx.lineJoin = 'round'; ctx.lineCap = 'round'
     if (s.tool === 'pen') { ctx.beginPath(); s.points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke() }
+    else if (s.tool === 'highlight') {
+      ctx.save()
+      ctx.globalAlpha = 0.35; ctx.lineWidth = s.width * 5; ctx.lineCap = 'round'; ctx.lineJoin = 'round'
+      ctx.beginPath(); s.points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke()
+      ctx.restore()
+    }
     else if (s.tool === 'rect') ctx.strokeRect(s.x, s.y, s.w, s.h)
     else if (s.tool === 'arrow') drawArrow(ctx, s.x1, s.y1, s.x2, s.y2, s.width)
     else if (s.tool === 'cloud') drawCloud(ctx, s.x, s.y, s.w, s.h)
     else if (s.tool === 'text') drawText(ctx, s)
     else if (s.tool === 'callout') drawCallout(ctx, s)
     else if (s.tool === 'cloudtext') drawCloudText(ctx, s)
+    else if (s.tool === 'stamp') drawStamp(ctx, s)
   }
 
   // ---------- geometry helpers ----------
@@ -249,7 +284,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     const ctx = canvasRef.current?.getContext('2d')
     if (s.tool === 'rect' || s.tool === 'cloud') return { x: Math.min(s.x, s.x + s.w), y: Math.min(s.y, s.y + s.h), w: Math.abs(s.w), h: Math.abs(s.h) }
     if (s.tool === 'arrow') return { x: Math.min(s.x1, s.x2), y: Math.min(s.y1, s.y2), w: Math.abs(s.x2 - s.x1), h: Math.abs(s.y2 - s.y1) }
-    if (s.tool === 'pen') {
+    if (s.tool === 'pen' || s.tool === 'highlight') {
       const xs = s.points.map(p => p.x), ys = s.points.map(p => p.y)
       return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }
     }
@@ -263,6 +298,11 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       const x0 = Math.min(s.x, s.tx), y0 = Math.min(s.y, s.ty)
       const x1 = Math.max(s.x + s.w, s.tx + b.w + 8), y1 = Math.max(s.y + s.h, s.ty + b.h + 4)
       return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+    if (s.tool === 'stamp') {
+      const sz = s.fontSize || 28
+      if (s.kind === 'rev') { const w = sz * 1.8, h = sz * 1.4; return { x: s.x - w / 2, y: s.y - h / 2, w, h } }
+      const d = sz * 0.95; return { x: s.x - d / 2, y: s.y - d / 2, w: d, h: d }
     }
     return { x: s.x || 0, y: s.y || 0, w: 0, h: 0 }
   }
@@ -357,10 +397,10 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
           .filter(s => !(s.id === ed.editId && !txt)))
       } else if (txt) {
         const shape = ed.kind === 'callout'
-          ? { id: idRef.current++, tool: 'callout', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, target: ed.target, text: txt }
+          ? { id: idRef.current++, tool: 'callout', color: colorRef.current, width: widthRef.current, fontSize: fontSizeRef.current, x: ed.cx, y: ed.cy, target: ed.target, text: txt }
           : ed.kind === 'cloudtext'
-          ? { id: idRef.current++, tool: 'cloudtext', color: colorRef.current, width: widthRef.current, x: ed.cloud.x, y: ed.cloud.y, w: ed.cloud.w, h: ed.cloud.h, tx: ed.cx, ty: ed.cy, text: txt }
-          : { id: idRef.current++, tool: 'text', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, text: txt }
+          ? { id: idRef.current++, tool: 'cloudtext', color: colorRef.current, width: widthRef.current, fontSize: fontSizeRef.current, x: ed.cloud.x, y: ed.cloud.y, w: ed.cloud.w, h: ed.cloud.h, tx: ed.cx, ty: ed.cy, text: txt }
+          : { id: idRef.current++, tool: 'text', color: colorRef.current, width: widthRef.current, fontSize: fontSizeRef.current, x: ed.cx, y: ed.cy, text: txt }
         setShapes(prev => [...prev, shape])
       }
       return null
@@ -427,7 +467,15 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       }
       return
     }
-    if (t === 'pen') { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: 'pen', color: colorRef.current, width: widthRef.current, points: [p] } } }
+    if (t === 'stamp') {
+      const kind = stampKindRef.current
+      const shape = { id: idRef.current++, tool: 'stamp', kind, color: colorRef.current, width: widthRef.current, fontSize: fontSizeRef.current, x: p.x, y: p.y }
+      if (kind === 'rev') { shape.num = revNumRef.current; revNumRef.current += 1 }
+      setShapes(prev => [...prev, shape])
+      setSelId(shape.id); selIdRef.current = shape.id
+      return
+    }
+    if (t === 'pen' || t === 'highlight') { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: t, color: colorRef.current, width: widthRef.current, points: [p] } } }
     else { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, w: 0, h: 0, x1: p.x, y1: p.y, x2: p.x, y2: p.y, _sx: p.x, _sy: p.y } } }
   }
 
@@ -457,7 +505,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
     if (it.mode === 'draw') {
       const d = it.shape
-      if (d.tool === 'pen') d.points.push(p)
+      if (d.tool === 'pen' || d.tool === 'highlight') d.points.push(p)
       else if (d.tool === 'arrow') { d.x2 = p.x; d.y2 = p.y }
       else { d.x = Math.min(d._sx, p.x); d.y = Math.min(d._sy, p.y); d.w = p.x - d._sx; d.h = p.y - d._sy }
       redraw(d); return
@@ -503,7 +551,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   }
 
   const translateShape = (s, dx, dy) => {
-    if (s.tool === 'pen') s.points.forEach(p => { p.x += dx; p.y += dy })
+    if (s.tool === 'pen' || s.tool === 'highlight') s.points.forEach(p => { p.x += dx; p.y += dy })
     else if (s.tool === 'arrow') { s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy }
     else if (s.tool === 'cloudtext') { s.x += dx; s.y += dy; s.tx += dx; s.ty += dy }
     else { s.x += dx; s.y += dy } // rect/cloud/text/callout box (callout target stays anchored)
@@ -535,6 +583,11 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const applyWidth = (w) => {
     setWidth(w)
     if (selId != null) setShapes(prev => prev.map(s => s.id === selId ? { ...s, width: w } : s))
+  }
+  const applyFontSize = (fs) => {
+    setFontSize(fs)
+    if (selId != null) setShapes(prev => prev.map(s =>
+      (s.id === selId && (s.tool === 'text' || s.tool === 'callout' || s.tool === 'cloudtext' || s.tool === 'stamp')) ? { ...s, fontSize: fs } : s))
   }
   const deleteSelected = () => { if (selId != null) { setShapes(prev => prev.filter(s => s.id !== selId)); setSelId(null) } }
 
@@ -598,7 +651,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
   const pct = Math.round((zoom / (fitRef.current || 1)) * 100)
   const selShape = shapes.find(s => s.id === selId)
-  const editorFs = (selId == null ? width : (shapes.find(s => s.id === selId)?.width || width)) * 6 * zoom
+  const editorFs = (selShape?.fontSize || fontSize) * zoom
 
   return (
     <div className="fixed z-[60] bg-white shadow-2xl border border-gray-300 flex flex-col select-none"
@@ -630,6 +683,9 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
         <span className="text-[11px] text-gray-500">Line</span>
         <input type="range" min="1" max="12" value={width} onChange={e => applyWidth(parseInt(e.target.value))} className="w-16 accent-blue-600" />
         <span className="w-px h-5 bg-gray-300 mx-1" />
+        <span className="text-[11px] text-gray-500">Text</span>
+        <input type="range" min="12" max="80" value={selShape?.fontSize || fontSize} onChange={e => applyFontSize(parseInt(e.target.value))} className="w-16 accent-blue-600" />
+        <span className="w-px h-5 bg-gray-300 mx-1" />
         <span className="text-[11px] text-gray-500">Zoom</span>
         <input type="range" min="20" max="400" value={pct}
           onChange={e => { userZoomedRef.current = true; setZoom((parseInt(e.target.value) / 100) * (fitRef.current || 1)) }} className="w-20 accent-blue-600" />
@@ -642,6 +698,18 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
         <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">Clear</button>
         {selShape?.tool === 'text' && (
           <button onClick={addLeaderToText} className="px-2 py-1 rounded text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200">+ leader</button>
+        )}
+        {tool === 'stamp' && (
+          <>
+            <span className="w-px h-5 bg-gray-300 mx-1" />
+            {[{ k: 'check', l: '✓' }, { k: 'cross', l: '✗' }, { k: 'rev', l: 'Δ' }].map(o => (
+              <button key={o.k} onClick={() => setStampKind(o.k)}
+                className={`px-2 py-1 rounded text-xs ${stampKind === o.k ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>{o.l}</button>
+            ))}
+            {stampKind === 'rev' && (
+              <button onClick={() => { revNumRef.current = 1 }} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-600" title="Reset Δ counter to 1">↺Δ</button>
+            )}
+          </>
         )}
       </div>
 
@@ -672,6 +740,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
           {tool === 'select' ? 'Click to select · drag to move · handles to resize · double-click text to edit · Del to remove'
             : tool === 'callout' ? 'Click the leader point, then click where the text goes'
             : tool === 'cloudtext' ? 'Drag to draw the cloud, then click where the text goes'
+            : tool === 'stamp' ? 'Pick ✓ / ✗ / Δ, then click to place it'
             : tool === 'text' ? 'Click to place text, then type'
             : 'Esc to exit tool · Ctrl+scroll or slider to zoom'}
         </span>
