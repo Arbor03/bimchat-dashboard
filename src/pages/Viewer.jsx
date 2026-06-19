@@ -188,18 +188,25 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     b.lines.forEach((ln, i) => ctx.fillText(ln, s.x, s.y + i * b.fs * 1.2))
   }
   const drawCallout = (ctx, s) => {
-    const b = textBox(ctx, s); const pad = 6
-    const bw = b.w + pad * 2, bh = b.h + pad * 2
+    const b = textBox(ctx, s); const padX = 4, padY = 2
+    const bw = b.w + padX * 2
+    const bh = b.h + padY * 2
+    const underlineY = s.y + bh
+    // leader: from the target point to the LEFT end of the underline
     if (s.target) {
       ctx.strokeStyle = s.color; ctx.lineWidth = s.width
-      ctx.beginPath(); ctx.moveTo(s.target.x, s.target.y); ctx.lineTo(s.x, s.y + bh); ctx.stroke()
+      ctx.beginPath(); ctx.moveTo(s.target.x, s.target.y); ctx.lineTo(s.x, underlineY); ctx.stroke()
       ctx.beginPath(); ctx.arc(s.target.x, s.target.y, Math.max(3, s.width), 0, Math.PI * 2)
       ctx.fillStyle = s.color; ctx.fill()
     }
-    ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillRect(s.x, s.y, bw, bh)
-    ctx.strokeStyle = s.color; ctx.lineWidth = s.width; ctx.strokeRect(s.x, s.y, bw, bh)
+    // subtle background for legibility (no border box)
+    ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillRect(s.x, s.y, bw, bh)
+    // text
     ctx.fillStyle = s.color; ctx.textBaseline = 'top'
-    b.lines.forEach((ln, i) => ctx.fillText(ln, s.x + pad, s.y + pad + i * b.fs * 1.2))
+    b.lines.forEach((ln, i) => ctx.fillText(ln, s.x + padX, s.y + padY + i * b.fs * 1.2))
+    // the single underline below the text
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width
+    ctx.beginPath(); ctx.moveTo(s.x, underlineY); ctx.lineTo(s.x + bw, underlineY); ctx.stroke()
   }
   const drawShape = (ctx, s) => {
     ctx.strokeStyle = s.color; ctx.fillStyle = s.color
@@ -222,8 +229,9 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) }
     }
     if (ctx && (s.tool === 'text' || s.tool === 'callout')) {
-      const b = textBox(ctx, s); const pad = s.tool === 'callout' ? 6 : 0
-      return { x: s.x, y: s.y, w: b.w + pad * 2, h: b.h + pad * 2 }
+      const b = textBox(ctx, s)
+      if (s.tool === 'callout') return { x: s.x, y: s.y, w: b.w + 8, h: b.h + 4 }
+      return { x: s.x, y: s.y, w: b.w, h: b.h }
     }
     return { x: s.x || 0, y: s.y || 0, w: 0, h: 0 }
   }
@@ -440,6 +448,18 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   }
   const deleteSelected = () => { if (selId != null) { setShapes(prev => prev.filter(s => s.id !== selId)); setSelId(null) } }
 
+  // Turn a selected plain Text into a Callout by adding a leader (default
+  // target below-left; the user can then drag the target handle).
+  const addLeaderToText = () => {
+    if (selId == null) return
+    const ctx = canvasRef.current?.getContext('2d')
+    setShapes(prev => prev.map(s => {
+      if (s.id !== selId || s.tool !== 'text') return s
+      const b = ctx ? textBox(ctx, s) : { w: 80, h: 20 }
+      return { ...s, tool: 'callout', target: { x: s.x + 20, y: s.y + b.h + 70 } }
+    }))
+  }
+
   const undo = () => setShapes(prev => prev.slice(0, -1))
   const clearAll = () => { setShapes([]); setSelId(null) }
 
@@ -487,6 +507,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     : { left: pos.x, top: pos.y, width: size.w, height: size.h }
 
   const pct = Math.round((zoom / (fitRef.current || 1)) * 100)
+  const selShape = shapes.find(s => s.id === selId)
   const editorFs = (selId == null ? width : (shapes.find(s => s.id === selId)?.width || width)) * 6 * zoom
 
   return (
@@ -529,6 +550,9 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
         <button onClick={deleteSelected} disabled={selId == null}
           className={`px-2 py-1 rounded text-xs ${selId == null ? 'bg-gray-50 text-gray-300' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>🗑 Delete</button>
         <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">Clear</button>
+        {selShape?.tool === 'text' && (
+          <button onClick={addLeaderToText} className="px-2 py-1 rounded text-xs bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200">+ leader</button>
+        )}
       </div>
 
       {/* canvas scroll area */}
