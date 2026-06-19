@@ -240,13 +240,18 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   }
   const drawCloudText = (ctx, s) => {
     drawCloud(ctx, s.x, s.y, s.w, s.h)
-    const cx = s.x + s.w / 2, cy = s.y + s.h / 2     // leader anchored at the cloud center
+    const cx = s.x + s.w / 2, cy = s.y + s.h / 2     // logical anchor = cloud center (stable)
     const b = textBox(ctx, s)
     const px = s.tx, py = s.ty + b.h + 4              // text underline-left (matches drawCallout)
-    // draw text + underline, then a leader from the cloud center to the text
     drawCallout(ctx, { ...s, x: s.tx, y: s.ty, target: null })
+    // leader from center to text, but visible only OUTSIDE the virtual rect
+    const dx = px - cx, dy = py - cy
+    const tX = Math.abs(dx) > 1e-3 ? (s.w / 2) / Math.abs(dx) : Infinity
+    const tY = Math.abs(dy) > 1e-3 ? (s.h / 2) / Math.abs(dy) : Infinity
+    const t = Math.min(tX, tY, 1)                     // exit point on the rectangle edge
+    const edge = { x: cx + dx * t, y: cy + dy * t }
     ctx.strokeStyle = s.color; ctx.lineWidth = s.width
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(edge.x, edge.y); ctx.lineTo(px, py); ctx.stroke()
   }
   const drawStamp = (ctx, s) => {
     const sz = s.fontSize || 28
