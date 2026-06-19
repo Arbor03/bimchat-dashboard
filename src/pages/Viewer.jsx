@@ -68,6 +68,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const histRef = useRef({ past: [], future: [] })   // undo/redo stacks of shape snapshots
   const prevShapesRef = useRef([])
   const skipHistRef = useRef(false)
+  const zoomAnchorRef = useRef(null)   // {ix,iy,clientX,clientY} to zoom around cursor
   const mountedRef = useRef(false)
   const [histTick, setHistTick] = useState(0)        // re-render so button states update
 
@@ -156,6 +157,18 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
   // keep fit correct as the window is resized / toggled fullscreen
   useEffect(() => { if (imgLoaded && !userZoomedRef.current) requestAnimationFrame(fitToWindow) }, [size.w, size.h, full])
+
+  // zoom around the cursor: after the canvas resized, scroll so the anchored
+  // image point stays under the mouse
+  useEffect(() => {
+    const a = zoomAnchorRef.current
+    const c = canvasRef.current, sc = scrollRef.current
+    if (!a || !c || !sc) return
+    const rect = c.getBoundingClientRect()
+    sc.scrollLeft += rect.left - (a.clientX - a.ix * zoom)
+    sc.scrollTop += rect.top - (a.clientY - a.iy * zoom)
+    zoomAnchorRef.current = null
+  }, [zoom])
 
   // ---------- drawing primitives ----------
   const drawArrow = (ctx, x1, y1, x2, y2, lw) => {
@@ -742,7 +755,17 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
       {/* canvas scroll area */}
       <div ref={scrollRef} className="flex-1 overflow-auto bg-gray-100 relative"
-        onWheel={e => { e.preventDefault(); userZoomedRef.current = true; setZoom(z => Math.max((fitRef.current || 1) * 0.2, Math.min((fitRef.current || 1) * 4, z - e.deltaY * 0.0015 * z))) }}>
+        onWheel={e => {
+          e.preventDefault()
+          const c = canvasRef.current
+          if (c) {
+            const rect = c.getBoundingClientRect()
+            const z0 = zoomRef.current || 1
+            zoomAnchorRef.current = { ix: (e.clientX - rect.left) / z0, iy: (e.clientY - rect.top) / z0, clientX: e.clientX, clientY: e.clientY }
+          }
+          userZoomedRef.current = true
+          setZoom(z => Math.max((fitRef.current || 1) * 0.2, Math.min((fitRef.current || 1) * 4, z - e.deltaY * 0.0015 * z)))
+        }}>
         <div className="relative" style={{ width: imgLoaded ? natRef.current.w * zoom : 'auto', height: imgLoaded ? natRef.current.h * zoom : 'auto', margin: 'auto' }}>
           {imgLoaded ? (
             <canvas ref={canvasRef}
