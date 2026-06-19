@@ -220,11 +220,14 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     const px = s.tx, py = s.ty + b.h + 4              // text underline-left (matches drawCallout)
     // draw the text + underline with NO leader (we draw our own clipped leader)
     drawCallout(ctx, { ...s, x: s.tx, y: s.ty, target: null })
-    // leader from cloud center to the text, but visible only OUTSIDE the cloud:
+    // leader from cloud center to the text, but visible only OUTSIDE the cloud.
+    // The scallops bulge ~r/2 beyond the virtual rect, so expand the cut by that.
     const dx = px - cx, dy = py - cy
-    const tX = Math.abs(dx) > 1e-3 ? (s.w / 2) / Math.abs(dx) : Infinity
-    const tY = Math.abs(dy) > 1e-3 ? (s.h / 2) / Math.abs(dy) : Infinity
-    const t = Math.min(tX, tY, 1)                     // where the center→text line exits the cloud
+    const r = Math.max(8, Math.min(Math.abs(s.w), Math.abs(s.h)) / 6)
+    const m = r / 2
+    const tX = Math.abs(dx) > 1e-3 ? (s.w / 2 + m) / Math.abs(dx) : Infinity
+    const tY = Math.abs(dy) > 1e-3 ? (s.h / 2 + m) / Math.abs(dy) : Infinity
+    const t = Math.min(tX, tY, 1)                     // where the line exits the visible cloud
     const edge = { x: cx + dx * t, y: cy + dy * t }
     ctx.strokeStyle = s.color; ctx.lineWidth = s.width
     ctx.beginPath(); ctx.moveTo(edge.x, edge.y); ctx.lineTo(px, py); ctx.stroke()
