@@ -1538,7 +1538,9 @@ export default function Viewer({
   const isImageAtt = (att) =>
     att.resource_type === 'image' ||
     (att.file_type && att.file_type.startsWith('image/')) ||
-    /\.(png|jpe?g|gif|webp)$/i.test(att.file_name || '')
+    /\.(png|jpe?g|gif|webp)$/i.test(att.file_name || '') ||
+    /\.(png|jpe?g|gif|webp)(\?|$)/i.test(att.file_url || '') ||
+    /\/image\/upload\//.test(att.file_url || '')
 
   const loadMissingAttachments = async (messages) => {
     const have = attByMsgRef.current
@@ -1573,6 +1575,12 @@ export default function Viewer({
         fd.append('file', pendingFile)
         fd.append('message_id', messageId)
         await axios.post(`${API}/attachments/upload`, fd, { headers: { Authorization: `Bearer ${token}` } })
+        // Fetch this message's attachments directly so it shows immediately
+        // (don't rely on the list-reload effect, which can race the DB write).
+        try {
+          const ar = await axios.get(`${API}/attachments/message/${messageId}`, { headers })
+          setAttByMsg(prev => ({ ...prev, [messageId]: ar.data || [] }))
+        } catch {}
       }
 
       setNewConvMessage('')
