@@ -35,8 +35,9 @@ const ANNOT_TOOLS = [
   { id: 'select', label: '⤢ Select' },
   { id: 'pen', label: '✏️ Pen' },
   { id: 'text', label: '🅰 Text' },
-  { id: 'cloud', label: '☁ Cloud' },
   { id: 'callout', label: '💬 Callout' },
+  { id: 'cloud', label: '☁ Cloud' },
+  { id: 'cloudtext', label: '☁🅰 Cloud+text' },
   { id: 'arrow', label: '➦ Arrow' },
   { id: 'rect', label: '▭ Rect' },
 ]
@@ -62,6 +63,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const [selId, setSelId] = useState(null)
   const selIdRef = useRef(null)
   const calloutTargetRef = useRef(null)   // 1st click of a callout (leader start)
+  const cloudTextPendingRef = useRef(null) // cloud drawn, waiting for the text click
   useEffect(() => { selIdRef.current = selId }, [selId])
 
   // zoom / fit
@@ -209,6 +211,11 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     ctx.strokeStyle = s.color; ctx.lineWidth = s.width
     ctx.beginPath(); ctx.moveTo(s.x, underlineY); ctx.lineTo(s.x + bw, underlineY); ctx.stroke()
   }
+  const drawCloudText = (ctx, s) => {
+    drawCloud(ctx, s.x, s.y, s.w, s.h)
+    const target = { x: s.x + s.w / 2, y: s.y + s.h / 2 }   // leader points at the cloud
+    drawCallout(ctx, { ...s, x: s.tx, y: s.ty, target })     // reuse text+underline+leader
+  }
   const drawShape = (ctx, s) => {
     ctx.strokeStyle = s.color; ctx.fillStyle = s.color
     ctx.lineWidth = s.width; ctx.lineJoin = 'round'; ctx.lineCap = 'round'
@@ -218,6 +225,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     else if (s.tool === 'cloud') drawCloud(ctx, s.x, s.y, s.w, s.h)
     else if (s.tool === 'text') drawText(ctx, s)
     else if (s.tool === 'callout') drawCallout(ctx, s)
+    else if (s.tool === 'cloudtext') drawCloudText(ctx, s)
   }
 
   // ---------- geometry helpers ----------
@@ -234,6 +242,12 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       if (s.tool === 'callout') return { x: s.x, y: s.y, w: b.w + 8, h: b.h + 4 }
       return { x: s.x, y: s.y, w: b.w, h: b.h }
     }
+    if (ctx && s.tool === 'cloudtext') {
+      const b = textBox(ctx, s)
+      const x0 = Math.min(s.x, s.tx), y0 = Math.min(s.y, s.ty)
+      const x1 = Math.max(s.x + s.w, s.tx + b.w + 8), y1 = Math.max(s.y + s.h, s.ty + b.h + 4)
+      return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
     return { x: s.x || 0, y: s.y || 0, w: 0, h: 0 }
   }
   const handlesOf = (s) => {
@@ -248,6 +262,13 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       return [
         { id: 'tl', x: b.x, y: b.y }, { id: 'tr', x: b.x + b.w, y: b.y },
         { id: 'br', x: b.x + b.w, y: b.y + b.h }, { id: 'bl', x: b.x, y: b.y + b.h },
+      ]
+    }
+    if (s.tool === 'cloudtext') {
+      return [
+        { id: 'tl', x: s.x, y: s.y }, { id: 'tr', x: s.x + s.w, y: s.y },
+        { id: 'br', x: s.x + s.w, y: s.y + s.h }, { id: 'bl', x: s.x, y: s.y + s.h },
+        { id: 'text', x: s.tx, y: s.ty },
       ]
     }
     return []
@@ -306,7 +327,9 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   // ---------- inline text editing ----------
   const openEditorFor = (s) => {
     setSelId(s.id)
-    setEditor({ kind: s.tool, cx: s.x, cy: s.y, target: s.target || null, text: s.text, editId: s.id })
+    const cx = s.tool === 'cloudtext' ? s.tx : s.x
+    const cy = s.tool === 'cloudtext' ? s.ty : s.y
+    setEditor({ kind: s.tool, cx, cy, target: s.target || null, text: s.text, editId: s.id })
     setTimeout(() => editorInputRef.current?.focus(), 0)
   }
   const commitEditor = () => {
@@ -319,6 +342,8 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       } else if (txt) {
         const shape = ed.kind === 'callout'
           ? { id: idRef.current++, tool: 'callout', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, target: ed.target, text: txt }
+          : ed.kind === 'cloudtext'
+          ? { id: idRef.current++, tool: 'cloudtext', color: colorRef.current, width: widthRef.current, x: ed.cloud.x, y: ed.cloud.y, w: ed.cloud.w, h: ed.cloud.h, tx: ed.cx, ty: ed.cy, text: txt }
           : { id: idRef.current++, tool: 'text', color: colorRef.current, width: widthRef.current, x: ed.cx, y: ed.cy, text: txt }
         setShapes(prev => [...prev, shape])
       }
@@ -373,6 +398,19 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       }
       return
     }
+    if (t === 'cloudtext') {
+      if (cloudTextPendingRef.current == null) {
+        // phase 1: drag out the cloud rectangle
+        interRef.current = { mode: 'cloudtextdraw', x: p.x, y: p.y, w: 0, h: 0, _sx: p.x, _sy: p.y }
+      } else {
+        // phase 2: click places the text, then the editor opens
+        const cloud = cloudTextPendingRef.current
+        cloudTextPendingRef.current = null
+        setEditor({ kind: 'cloudtext', cx: p.x, cy: p.y, cloud, text: '', editId: null })
+        setTimeout(() => editorInputRef.current?.focus(), 0)
+      }
+      return
+    }
     if (t === 'pen') { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: 'pen', color: colorRef.current, width: widthRef.current, points: [p] } } }
     else { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, w: 0, h: 0, x1: p.x, y1: p.y, x2: p.x, y2: p.y, _sx: p.x, _sy: p.y } } }
   }
@@ -384,8 +422,22 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       redraw({ tool: 'callout', color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, target: calloutTargetRef.current, text: '…' })
       return
     }
+    // cloudtext phase 2: cloud is drawn, preview text+leader following cursor
+    if (toolRef.current === 'cloudtext' && cloudTextPendingRef.current && !interRef.current) {
+      const cl = cloudTextPendingRef.current
+      redraw({ tool: 'cloudtext', color: colorRef.current, width: widthRef.current, x: cl.x, y: cl.y, w: cl.w, h: cl.h, tx: p.x, ty: p.y, text: '…' })
+      return
+    }
     const it = interRef.current
     if (!it) return
+
+    // cloudtext phase 1: dragging the cloud rectangle
+    if (it.mode === 'cloudtextdraw') {
+      it.x = Math.min(it._sx, p.x); it.y = Math.min(it._sy, p.y)
+      it.w = Math.abs(p.x - it._sx); it.h = Math.abs(p.y - it._sy)
+      redraw({ tool: 'cloud', color: colorRef.current, width: widthRef.current, x: it.x, y: it.y, w: it.w, h: it.h })
+      return
+    }
 
     if (it.mode === 'draw') {
       const d = it.shape
@@ -408,6 +460,12 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const onUp = (e) => {
     const it = interRef.current; interRef.current = null
     if (!it) return
+    if (it.mode === 'cloudtextdraw') {
+      if (it.w < 5 || it.h < 5) { cloudTextPendingRef.current = null; redraw(); return }
+      cloudTextPendingRef.current = { x: it.x, y: it.y, w: it.w, h: it.h }
+      redraw()
+      return
+    }
     if (it.mode === 'draw') {
       const d = it.shape
       const tiny = (d.tool === 'rect' || d.tool === 'cloud') && Math.abs(d.w) < 3 && Math.abs(d.h) < 3
@@ -425,17 +483,25 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const onDbl = (e) => {
     const p = toCanvasXY(e)
     const s = hitShape(p.x, p.y)
-    if (s && (s.tool === 'text' || s.tool === 'callout')) openEditorFor(s)
+    if (s && (s.tool === 'text' || s.tool === 'callout' || s.tool === 'cloudtext')) openEditorFor(s)
   }
 
   const translateShape = (s, dx, dy) => {
     if (s.tool === 'pen') s.points.forEach(p => { p.x += dx; p.y += dy })
     else if (s.tool === 'arrow') { s.x1 += dx; s.y1 += dy; s.x2 += dx; s.y2 += dy }
+    else if (s.tool === 'cloudtext') { s.x += dx; s.y += dy; s.tx += dx; s.ty += dy }
     else { s.x += dx; s.y += dy } // rect/cloud/text/callout box (callout target stays anchored)
   }
   const applyResize = (s, handle, p) => {
     if (s.tool === 'arrow') { if (handle === 'p1') { s.x1 = p.x; s.y1 = p.y } else { s.x2 = p.x; s.y2 = p.y }; return }
     if (s.tool === 'callout') { if (handle === 'target') s.target = { x: p.x, y: p.y }; else { s.x = p.x; s.y = p.y }; return }
+    if (s.tool === 'cloudtext') {
+      if (handle === 'text') { s.tx = p.x; s.ty = p.y; return }
+      let x0 = s.x, y0 = s.y, x1 = s.x + s.w, y1 = s.y + s.h
+      if (handle === 'tl') { x0 = p.x; y0 = p.y } else if (handle === 'tr') { x1 = p.x; y0 = p.y }
+      else if (handle === 'br') { x1 = p.x; y1 = p.y } else if (handle === 'bl') { x0 = p.x; y1 = p.y }
+      s.x = Math.min(x0, x1); s.y = Math.min(y0, y1); s.w = Math.abs(x1 - x0); s.h = Math.abs(y1 - y0); return
+    }
     if (s.tool === 'rect' || s.tool === 'cloud') {
       const b = bbox(s)
       let x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.h
@@ -474,7 +540,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   // keyboard: Esc exits tool/editor; Delete removes selection
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape') { if (editor) setEditor(null); else if (calloutTargetRef.current) { calloutTargetRef.current = null; redraw() } else if (interRef.current) { interRef.current = null; redraw() } else { setSelId(null); setTool('select') } }
+      if (e.key === 'Escape') { if (editor) setEditor(null); else if (calloutTargetRef.current) { calloutTargetRef.current = null; redraw() } else if (cloudTextPendingRef.current) { cloudTextPendingRef.current = null; redraw() } else if (interRef.current) { interRef.current = null; redraw() } else { setSelId(null); setTool('select') } }
       else if ((e.key === 'Delete' || e.key === 'Backspace') && !editor && selIdRef.current != null) { e.preventDefault(); deleteSelected() }
     }
     window.addEventListener('keydown', onKey)
@@ -536,7 +602,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       {/* toolbar */}
       <div className="px-2 py-2 border-b flex items-center gap-1.5 flex-wrap flex-shrink-0">
         {ANNOT_TOOLS.map(t => (
-          <button key={t.id} onClick={() => { commitEditor(); calloutTargetRef.current = null; setTool(t.id); if (t.id !== 'select') setSelId(null) }}
+          <button key={t.id} onClick={() => { commitEditor(); calloutTargetRef.current = null; cloudTextPendingRef.current = null; setTool(t.id); if (t.id !== 'select') setSelId(null) }}
             className={`px-2 py-1 rounded text-xs ${tool === t.id ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>{t.label}</button>
         ))}
         <span className="w-px h-5 bg-gray-300 mx-1" />
@@ -589,6 +655,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
         <span className="text-[11px] text-gray-400">
           {tool === 'select' ? 'Click to select · drag to move · handles to resize · double-click text to edit · Del to remove'
             : tool === 'callout' ? 'Click the leader point, then click where the text goes'
+            : tool === 'cloudtext' ? 'Drag to draw the cloud, then click where the text goes'
             : tool === 'text' ? 'Click to place text, then type'
             : 'Esc to exit tool · Ctrl+scroll or slider to zoom'}
         </span>
