@@ -65,6 +65,11 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const shapesRef = useRef([])
   useEffect(() => { shapesRef.current = shapes }, [shapes])
   const idRef = useRef(1)
+  const histRef = useRef({ past: [], future: [] })   // undo/redo stacks of shape snapshots
+  const prevShapesRef = useRef([])
+  const skipHistRef = useRef(false)
+  const mountedRef = useRef(false)
+  const [histTick, setHistTick] = useState(0)        // re-render so button states update
 
   const [selId, setSelId] = useState(null)
   const selIdRef = useRef(null)
@@ -222,22 +227,13 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   }
   const drawCloudText = (ctx, s) => {
     drawCloud(ctx, s.x, s.y, s.w, s.h)
-    const cx = s.x + s.w / 2, cy = s.y + s.h / 2     // logical anchor = cloud center (stable)
+    const cx = s.x + s.w / 2, cy = s.y + s.h / 2     // leader anchored at the cloud center
     const b = textBox(ctx, s)
     const px = s.tx, py = s.ty + b.h + 4              // text underline-left (matches drawCallout)
-    // draw the text + underline with NO leader (we draw our own clipped leader)
+    // draw text + underline, then a leader from the cloud center to the text
     drawCallout(ctx, { ...s, x: s.tx, y: s.ty, target: null })
-    // leader from cloud center to the text, but visible only OUTSIDE the cloud.
-    // The scallops bulge ~r/2 beyond the virtual rect, so expand the cut by that.
-    const dx = px - cx, dy = py - cy
-    const r = Math.max(8, Math.min(Math.abs(s.w), Math.abs(s.h)) / 6)
-    const m = r / 2
-    const tX = Math.abs(dx) > 1e-3 ? (s.w / 2 + m) / Math.abs(dx) : Infinity
-    const tY = Math.abs(dy) > 1e-3 ? (s.h / 2 + m) / Math.abs(dy) : Infinity
-    const t = Math.min(tX, tY, 1)                     // where the line exits the visible cloud
-    const edge = { x: cx + dx * t, y: cy + dy * t }
     ctx.strokeStyle = s.color; ctx.lineWidth = s.width
-    ctx.beginPath(); ctx.moveTo(edge.x, edge.y); ctx.lineTo(px, py); ctx.stroke()
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py); ctx.stroke()
   }
   const drawStamp = (ctx, s) => {
     const sz = s.fontSize || 28
@@ -603,12 +599,40 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     }))
   }
 
-  const undo = () => setShapes(prev => prev.slice(0, -1))
+  // record every shape change into the undo history (skip our own undo/redo)
+  useEffect(() => {
+    if (!mountedRef.current) { mountedRef.current = true; prevShapesRef.current = shapes; return }
+    if (skipHistRef.current) { skipHistRef.current = false; prevShapesRef.current = shapes; return }
+    histRef.current.past.push(prevShapesRef.current)
+    histRef.current.future = []
+    prevShapesRef.current = shapes
+    setHistTick(t => t + 1)
+  }, [shapes])
+
+  const undo = () => {
+    const h = histRef.current
+    if (!h.past.length) return
+    const prev = h.past.pop()
+    h.future.push(prevShapesRef.current)
+    skipHistRef.current = true; prevShapesRef.current = prev
+    setShapes(prev); setSelId(null); setEditor(null); setHistTick(t => t + 1)
+  }
+  const redo = () => {
+    const h = histRef.current
+    if (!h.future.length) return
+    const next = h.future.pop()
+    h.past.push(prevShapesRef.current)
+    skipHistRef.current = true; prevShapesRef.current = next
+    setShapes(next); setSelId(null); setEditor(null); setHistTick(t => t + 1)
+  }
   const clearAll = () => { setShapes([]); setSelId(null) }
 
   // keyboard: Esc exits tool/editor; Delete removes selection
   useEffect(() => {
     const onKey = (e) => {
+      const mod = e.ctrlKey || e.metaKey
+      if (mod && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return }
+      if (mod && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); return }
       if (e.key === 'Escape') { if (editor) setEditor(null); else if (calloutTargetRef.current) { calloutTargetRef.current = null; redraw() } else if (cloudTextPendingRef.current) { cloudTextPendingRef.current = null; redraw() } else if (interRef.current) { interRef.current = null; redraw() } else { setSelId(null); setTool('select') } }
       else if ((e.key === 'Delete' || e.key === 'Backspace') && !editor && selIdRef.current != null) { e.preventDefault(); deleteSelected() }
     }
@@ -692,7 +716,10 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
         <span className="text-[11px] text-gray-400 w-9">{pct}%</span>
         <button onClick={() => { userZoomedRef.current = false; fitToWindow() }} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">⤢ Fit</button>
         <span className="w-px h-5 bg-gray-300 mx-1" />
-        <button onClick={undo} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">↶ Undo</button>
+        <button onClick={undo} disabled={histRef.current.past.length === 0}
+          className={`px-2 py-1 rounded text-xs ${histRef.current.past.length === 0 ? 'bg-gray-50 text-gray-300' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>↶ Undo</button>
+        <button onClick={redo} disabled={histRef.current.future.length === 0}
+          className={`px-2 py-1 rounded text-xs ${histRef.current.future.length === 0 ? 'bg-gray-50 text-gray-300' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>↷ Redo</button>
         <button onClick={deleteSelected} disabled={selId == null}
           className={`px-2 py-1 rounded text-xs ${selId == null ? 'bg-gray-50 text-gray-300' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>🗑 Delete</button>
         <button onClick={clearAll} className="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-700">Clear</button>
@@ -715,7 +742,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
       {/* canvas scroll area */}
       <div ref={scrollRef} className="flex-1 overflow-auto bg-gray-100 relative"
-        onWheel={e => { if (e.ctrlKey) { e.preventDefault(); userZoomedRef.current = true; setZoom(z => Math.max((fitRef.current || 1) * 0.2, Math.min((fitRef.current || 1) * 4, z - e.deltaY * 0.0015 * z))) } }}>
+        onWheel={e => { e.preventDefault(); userZoomedRef.current = true; setZoom(z => Math.max((fitRef.current || 1) * 0.2, Math.min((fitRef.current || 1) * 4, z - e.deltaY * 0.0015 * z))) }}>
         <div className="relative" style={{ width: imgLoaded ? natRef.current.w * zoom : 'auto', height: imgLoaded ? natRef.current.h * zoom : 'auto', margin: 'auto' }}>
           {imgLoaded ? (
             <canvas ref={canvasRef}
@@ -742,7 +769,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
             : tool === 'cloudtext' ? 'Drag to draw the cloud, then click where the text goes'
             : tool === 'stamp' ? 'Pick ✓ / ✗ / Δ, then click to place it'
             : tool === 'text' ? 'Click to place text, then type'
-            : 'Esc to exit tool · Ctrl+scroll or slider to zoom'}
+            : 'Esc to exit tool · scroll or slider to zoom · Ctrl+Z undo / Ctrl+Y redo'}
         </span>
         <div className="flex gap-2">
           <button onClick={onCancel} className="px-4 py-1.5 rounded bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm">Cancel</button>
