@@ -61,6 +61,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
 
   const [selId, setSelId] = useState(null)
   const selIdRef = useRef(null)
+  const calloutTargetRef = useRef(null)   // 1st click of a callout (leader start)
   useEffect(() => { selIdRef.current = selId }, [selId])
 
   // zoom / fit
@@ -359,15 +360,32 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
     // drawing tools
     setSelId(null); selIdRef.current = null
     if (t === 'text') { setEditor({ kind: 'text', cx: p.x, cy: p.y, target: null, text: '', editId: null }); setTimeout(() => editorInputRef.current?.focus(), 0); return }
-    if (t === 'callout') { interRef.current = { mode: 'callout', target: { x: p.x, y: p.y }, x: p.x, y: p.y }; return }
+    if (t === 'callout') {
+      if (calloutTargetRef.current == null) {
+        // 1st click: set where the leader starts
+        calloutTargetRef.current = { x: p.x, y: p.y }
+      } else {
+        // 2nd click: set text position, then open the editor
+        const target = calloutTargetRef.current
+        calloutTargetRef.current = null
+        setEditor({ kind: 'callout', cx: p.x, cy: p.y, target, text: '', editId: null })
+        setTimeout(() => editorInputRef.current?.focus(), 0)
+      }
+      return
+    }
     if (t === 'pen') { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: 'pen', color: colorRef.current, width: widthRef.current, points: [p] } } }
     else { interRef.current = { mode: 'draw', shape: { id: idRef.current++, tool: t, color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, w: 0, h: 0, x1: p.x, y1: p.y, x2: p.x, y2: p.y, _sx: p.x, _sy: p.y } } }
   }
 
   const onMove = (e) => {
+    const p = toCanvasXY(e)
+    // callout: after the 1st click, preview the leader following the cursor
+    if (toolRef.current === 'callout' && calloutTargetRef.current && !interRef.current) {
+      redraw({ tool: 'callout', color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, target: calloutTargetRef.current, text: '…' })
+      return
+    }
     const it = interRef.current
     if (!it) return
-    const p = toCanvasXY(e)
 
     if (it.mode === 'draw') {
       const d = it.shape
@@ -375,10 +393,6 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       else if (d.tool === 'arrow') { d.x2 = p.x; d.y2 = p.y }
       else { d.x = Math.min(d._sx, p.x); d.y = Math.min(d._sy, p.y); d.w = p.x - d._sx; d.h = p.y - d._sy }
       redraw(d); return
-    }
-    if (it.mode === 'callout') {
-      it.x = p.x; it.y = p.y
-      redraw({ tool: 'callout', color: colorRef.current, width: widthRef.current, x: p.x, y: p.y, target: it.target, text: '…' }); return
     }
     if (it.mode === 'move') {
       const s = shapesRef.current.find(x => x.id === it.id); if (!s) return
@@ -401,12 +415,6 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       if (tiny || tinyArrow) { redraw(); return }
       if (d.tool === 'rect' || d.tool === 'cloud') { d.x = Math.min(d.x, d.x + d.w); d.y = Math.min(d.y, d.y + d.h); d.w = Math.abs(d.w); d.h = Math.abs(d.h) }
       setShapes(prev => [...prev, d])
-      return
-    }
-    if (it.mode === 'callout') {
-      const p = toCanvasXY(e)
-      setEditor({ kind: 'callout', cx: p.x, cy: p.y, target: it.target, text: '', editId: null })
-      setTimeout(() => editorInputRef.current?.focus(), 0)
       return
     }
     if (it.mode === 'move' || it.mode === 'resize') {
@@ -466,7 +474,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   // keyboard: Esc exits tool/editor; Delete removes selection
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape') { if (editor) setEditor(null); else if (interRef.current) { interRef.current = null; redraw() } else { setSelId(null); setTool('select') } }
+      if (e.key === 'Escape') { if (editor) setEditor(null); else if (calloutTargetRef.current) { calloutTargetRef.current = null; redraw() } else if (interRef.current) { interRef.current = null; redraw() } else { setSelId(null); setTool('select') } }
       else if ((e.key === 'Delete' || e.key === 'Backspace') && !editor && selIdRef.current != null) { e.preventDefault(); deleteSelected() }
     }
     window.addEventListener('keydown', onKey)
@@ -528,7 +536,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       {/* toolbar */}
       <div className="px-2 py-2 border-b flex items-center gap-1.5 flex-wrap flex-shrink-0">
         {ANNOT_TOOLS.map(t => (
-          <button key={t.id} onClick={() => { commitEditor(); setTool(t.id); if (t.id !== 'select') setSelId(null) }}
+          <button key={t.id} onClick={() => { commitEditor(); calloutTargetRef.current = null; setTool(t.id); if (t.id !== 'select') setSelId(null) }}
             className={`px-2 py-1 rounded text-xs ${tool === t.id ? 'bg-blue-600 text-white' : 'bg-gray-100 hover:bg-gray-200 text-gray-700'}`}>{t.label}</button>
         ))}
         <span className="w-px h-5 bg-gray-300 mx-1" />
@@ -580,7 +588,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       <div className="px-3 py-2 border-t flex justify-between items-center flex-shrink-0">
         <span className="text-[11px] text-gray-400">
           {tool === 'select' ? 'Click to select · drag to move · handles to resize · double-click text to edit · Del to remove'
-            : tool === 'callout' ? 'Click target, drag to the box, then type'
+            : tool === 'callout' ? 'Click the leader point, then click where the text goes'
             : tool === 'text' ? 'Click to place text, then type'
             : 'Esc to exit tool · Ctrl+scroll or slider to zoom'}
         </span>
