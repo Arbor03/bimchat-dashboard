@@ -48,6 +48,7 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
   const imgRef = useRef(null)
   const scrollRef = useRef(null)
   const [imgLoaded, setImgLoaded] = useState(false)
+  const [imgVer, setImgVer] = useState(0)
 
   const [tool, setTool] = useState('pen')
   const [color, setColor] = useState('#e74c3c')
@@ -92,21 +93,27 @@ function AnnotateModal({ imageUrl, onCancel, onSend }) {
       imgRef.current = img
       natRef.current = { w: img.naturalWidth, h: img.naturalHeight }
       userZoomedRef.current = false
+      setShapes([])            // drop annotations from the previous screenshot
+      setSelId(null); selIdRef.current = null
+      setEditor(null)
       setImgLoaded(true)
+      setImgVer(v => v + 1)    // force the sizing effect to run for EVERY new image
     }
     img.src = imageUrl
   }, [imageUrl])
 
   // The <canvas> only mounts after imgLoaded, so size it HERE (canvas now
   // exists) — not inside img.onload, where canvasRef was still null and the
-  // canvas stayed at its default 300x150 (which clipped the screenshot).
+  // canvas stayed at its default 300x150 (which clipped the screenshot). Runs
+  // on every new image (imgVer) so a 2nd/3rd capture resizes instead of
+  // stretching the old canvas.
   useEffect(() => {
     if (!imgLoaded) return
     const c = canvasRef.current
     if (c) { c.width = natRef.current.w; c.height = natRef.current.h }
     redraw()
     requestAnimationFrame(() => { fitToWindow(); requestAnimationFrame(fitToWindow) })
-  }, [imgLoaded])
+  }, [imgVer])
 
   const areaSize = () => {
     const el = scrollRef.current
